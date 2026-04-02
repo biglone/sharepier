@@ -24,7 +24,7 @@ services:
     image: golang:1.26.1-alpine
     container_name: sharepier-api
     working_dir: /app
-    command: sh -c 'if [ -x ./api ]; then exec ./api; fi; export PATH=/usr/local/go/bin:$PATH; go mod download && go run ./cmd/api'
+    command: sh -c 'export PATH=/usr/local/go/bin:$PATH; go mod download && go run ./cmd/api'
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     environment:
@@ -32,7 +32,7 @@ services:
       HTTPS_PROXY: ${DOCKER_HTTPS_PROXY:-${HTTPS_PROXY:-}}
       ALL_PROXY: ${DOCKER_ALL_PROXY:-${ALL_PROXY:-}}
       NO_PROXY: ${DOCKER_NO_PROXY:-${NO_PROXY:-}}
-      GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+      GOPROXY: ${DOCKER_GOPROXY:-https://goproxy.cn,direct}
       DATABASE_URL: ${DATABASE_URL:-postgres://sharepier:sharepier@postgres:5432/sharepier?sslmode=disable}
       SHAREPIER_ENV: ${SHAREPIER_ENV:-development}
       SHAREPIER_HOST: ${SHAREPIER_HOST:-0.0.0.0}

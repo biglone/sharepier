@@ -4,8 +4,8 @@
 
 ## 当前骨架
 
-- `sharepier-web`: `React + Vite + TypeScript` 管理台、搜索/筛选/批量操作、分享策略配置与公开分享页，当前走静态构建产物服务
-- `sharepier-api`: `Go + chi` API、管理员登录、普通上传、分片上传/续传、列表、禁用、删除、公开下载、公开文件元数据、分享策略鉴权，以及 `local/S3-compatible` 对象存储后端
+- `sharepier-web`: `React + Vite + TypeScript` 管理台、搜索/筛选/批量操作、分享策略配置、审计/下载操作记录与公开分享页，当前走静态构建产物服务
+- `sharepier-api`: `Go + chi` API、管理员登录、普通上传、分片上传/续传、列表、禁用、删除、公开下载、公开文件元数据、分享策略鉴权、审计日志，以及 `local/S3-compatible` 对象存储后端
 - `docker-compose.yml`: 本地开发依赖与容器化运行入口
 - `cloudflared/config.yml.example`: Tunnel 配置示例
 - `sharepier-api/migrations/0001_init.sql`: 首版数据库表结构草稿
@@ -45,7 +45,7 @@ Compose 已为容器注入 `host.docker.internal -> host-gateway`，便于这种
 
 - `postgres` 服务直接使用官方 `postgres:17-alpine` 镜像，数据仍持久化到 `./data/postgres`
 - 如果本机 Docker 需要代理拉取镜像，优先设置 `DOCKER_HTTP_PROXY` / `DOCKER_HTTPS_PROXY` / `DOCKER_ALL_PROXY`，必要时先手动执行 `docker pull postgres:17-alpine`
-- `sharepier-api` 默认 `GOPROXY` 已切到 `https://goproxy.cn,direct`，避免容器内拉取较大 Go 依赖时频繁遇到 `unexpected EOF`
+- `sharepier-api` 容器默认使用 `DOCKER_GOPROXY=https://goproxy.cn,direct`，避免容器内拉取较大 Go 依赖时频繁遇到 `unexpected EOF`
 - `sharepier-web` 默认使用 `npm ci`，并通过 `NPM_CONFIG_REGISTRY` 指向 `https://registry.npmmirror.com`，减少容器内首次安装依赖耗时
 - `sharepier-web` 使用 `node:22-alpine`，容器启动后会先构建静态资源，再用 Node 静态文件服务对外提供页面
 - 默认普通上传入口受 `SHAREPIER_MAX_UPLOAD_SIZE` 控制；大文件分片上传走独立会话，单片大小由 `SHAREPIER_RESUMABLE_CHUNK_SIZE` 控制，会话过期时间由 `SHAREPIER_UPLOAD_SESSION_TTL` 控制
@@ -192,4 +192,5 @@ docker compose up -d sharepier-api
 
 - 将管理员密码替换成你自己的长期密码
 - 将 `SHAREPIER_SHARE_ACCESS_SECRET` 换成独立随机长串
-- 增加审计日志与操作记录页
+- 增加审计日志筛选 / 导出能力
+- 增加存储配额与用量统计

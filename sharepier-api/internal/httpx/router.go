@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"mime"
@@ -13,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	cors "github.com/go-chi/cors"
 
+	"sharepier-api/internal/audit"
 	"sharepier-api/internal/auth"
 	"sharepier-api/internal/config"
 	"sharepier-api/internal/files"
@@ -68,12 +70,20 @@ type uploadSessionResponse struct {
 	Timestamp string               `json:"timestamp,omitempty"`
 }
 
+type auditLogsResponse struct {
+	Status    string         `json:"status"`
+	Items     []audit.Record `json:"items,omitempty"`
+	Message   string         `json:"message,omitempty"`
+	Timestamp string         `json:"timestamp,omitempty"`
+}
+
 func NewRouter(
 	cfg config.Config,
 	logger *slog.Logger,
 	store storage.Store,
 	authService *auth.Service,
 	fileService *files.Service,
+	auditService *audit.Service,
 ) http.Handler {
 	router := chi.NewRouter()
 
@@ -103,6 +113,15 @@ func NewRouter(
 		})
 	})
 
+	logAuditEvent := func(ctx context.Context, event audit.Event) {
+		if auditService == nil {
+			return
+		}
+		if err := auditService.Log(ctx, event); err != nil {
+			logger.Warn("failed to persist audit log", slog.String("error", err.Error()), slog.String("action", event.Action))
+		}
+	}
+
 	router.Route("/api/v1", func(r chi.Router) {
 		r.Post("/auth/login", func(w http.ResponseWriter, r *http.Request) {
 			var payload loginRequest
@@ -119,6 +138,12 @@ func NewRouter(
 			if err != nil {
 				switch {
 				case errors.Is(err, auth.ErrInvalidCredentials):
+					logAuditEvent(r.Context(), audit.Event{
+						ActorUsername: strings.TrimSpace(payload.Username),
+						Action:        "auth_login_failed",
+						IPAddress:     r.RemoteAddr,
+						UserAgent:     r.UserAgent(),
+					})
 					writeJSON(w, http.StatusUnauthorized, authResponse{
 						Status:    "unauthorized",
 						Message:   "用户名或密码错误",
@@ -135,6 +160,16 @@ func NewRouter(
 			}
 
 			authService.SetSessionCookie(w, token, expiresAt)
+			logAuditEvent(r.Context(), audit.Event{
+				ActorUserID:   &user.ID,
+				ActorUsername: user.Username,
+				Action:        "auth_login",
+				Metadata: map[string]any{
+					"role": user.Role,
+				},
+				IPAddress: r.RemoteAddr,
+				UserAgent: r.UserAgent(),
+			})
 			writeJSON(w, http.StatusOK, authResponse{
 				Status:    "ok",
 				User:      &user,
@@ -144,6 +179,7 @@ func NewRouter(
 
 		r.Post("/auth/logout", func(w http.ResponseWriter, r *http.Request) {
 			token := authService.SessionTokenFromRequest(r)
+			currentUser, _ := authService.CurrentUser(r.Context(), token)
 			if err := authService.Logout(r.Context(), token); err != nil {
 				writeJSON(w, http.StatusInternalServerError, authResponse{
 					Status:    "error",
@@ -154,6 +190,15 @@ func NewRouter(
 			}
 
 			authService.ClearSessionCookie(w)
+			if currentUser.ID > 0 {
+				logAuditEvent(r.Context(), audit.Event{
+					ActorUserID:   &currentUser.ID,
+					ActorUsername: currentUser.Username,
+					Action:        "auth_logout",
+					IPAddress:     r.RemoteAddr,
+					UserAgent:     r.UserAgent(),
+				})
+			}
 			writeJSON(w, http.StatusOK, authResponse{
 				Status:    "ok",
 				Message:   "logged out",
@@ -182,6 +227,31 @@ func NewRouter(
 			writeJSON(w, http.StatusOK, authResponse{
 				Status:    "ok",
 				User:      &user,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+		})
+
+		r.With(requireAuth(authService)).Get("/audit/logs", func(w http.ResponseWriter, r *http.Request) {
+			limit := 50
+			if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+				if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+					limit = parsed
+				}
+			}
+
+			items, err := auditService.List(r.Context(), audit.ListParams{Limit: limit})
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, auditLogsResponse{
+					Status:    "error",
+					Message:   "failed to load audit logs",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			writeJSON(w, http.StatusOK, auditLogsResponse{
+				Status:    "ok",
+				Items:     items,
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 			})
 		})
@@ -227,6 +297,7 @@ func NewRouter(
 				return
 			}
 
+			before, _ := fileService.GetByID(r.Context(), fileID)
 			item, err := fileService.SetStatus(r.Context(), fileID, payload.Status)
 			if err != nil {
 				statusCode := http.StatusInternalServerError
@@ -247,6 +318,23 @@ func NewRouter(
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
 				})
 				return
+			}
+
+			if user, ok := auth.UserFromContext(r.Context()); ok {
+				logAuditEvent(r.Context(), audit.Event{
+					ActorUserID:     &user.ID,
+					ActorUsername:   user.Username,
+					Action:          "file_status_change",
+					FileID:          &item.ID,
+					FilePublicID:    item.PublicID,
+					FileDisplayName: item.DisplayName,
+					Metadata: map[string]any{
+						"from": before.Status,
+						"to":   item.Status,
+					},
+					IPAddress: r.RemoteAddr,
+					UserAgent: r.UserAgent(),
+				})
 			}
 
 			writeJSON(w, http.StatusOK, filesResponse{
@@ -324,6 +412,24 @@ func NewRouter(
 				return
 			}
 
+			if user, ok := auth.UserFromContext(r.Context()); ok {
+				logAuditEvent(r.Context(), audit.Event{
+					ActorUserID:     &user.ID,
+					ActorUsername:   user.Username,
+					Action:          "file_share_policy_update",
+					FileID:          &item.ID,
+					FilePublicID:    item.PublicID,
+					FileDisplayName: item.DisplayName,
+					Metadata: map[string]any{
+						"expiresAt":         item.ExpiresAt,
+						"maxDownloads":      item.MaxDownloads,
+						"passwordProtected": item.PasswordProtected,
+					},
+					IPAddress: r.RemoteAddr,
+					UserAgent: r.UserAgent(),
+				})
+			}
+
 			writeJSON(w, http.StatusOK, filesResponse{
 				Status:    "ok",
 				Item:      &item,
@@ -347,6 +453,7 @@ func NewRouter(
 			}
 
 			action := strings.TrimSpace(strings.ToLower(payload.Action))
+			selectedItems, _ := fileService.ListByIDs(r.Context(), payload.FileIDs)
 			var (
 				affectedCount int64
 				err           error
@@ -401,6 +508,28 @@ func NewRouter(
 				return
 			}
 
+			if user, ok := auth.UserFromContext(r.Context()); ok {
+				metadata := map[string]any{
+					"affectedCount": affectedCount,
+					"fileIds":       payload.FileIDs,
+					"fileNames":     collectFileNames(selectedItems),
+				}
+				actionName := "file_batch_delete"
+				if action == "set_status" {
+					actionName = "file_batch_set_status"
+					metadata["status"] = payload.Status
+				}
+
+				logAuditEvent(r.Context(), audit.Event{
+					ActorUserID:   &user.ID,
+					ActorUsername: user.Username,
+					Action:        actionName,
+					Metadata:      metadata,
+					IPAddress:     r.RemoteAddr,
+					UserAgent:     r.UserAgent(),
+				})
+			}
+
 			writeJSON(w, http.StatusOK, filesResponse{
 				Status:        "ok",
 				AffectedCount: affectedCount,
@@ -420,6 +549,7 @@ func NewRouter(
 				return
 			}
 
+			item, _ := fileService.GetByID(r.Context(), fileID)
 			if err := fileService.Delete(r.Context(), fileID); err != nil {
 				statusCode := http.StatusInternalServerError
 				message := "failed to delete file"
@@ -434,6 +564,24 @@ func NewRouter(
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
 				})
 				return
+			}
+
+			if item.ID > 0 {
+				if user, ok := auth.UserFromContext(r.Context()); ok {
+					logAuditEvent(r.Context(), audit.Event{
+						ActorUserID:     &user.ID,
+						ActorUsername:   user.Username,
+						Action:          "file_delete",
+						FileID:          &item.ID,
+						FilePublicID:    item.PublicID,
+						FileDisplayName: item.DisplayName,
+						Metadata: map[string]any{
+							"size": item.Size,
+						},
+						IPAddress: r.RemoteAddr,
+						UserAgent: r.UserAgent(),
+					})
+				}
 			}
 
 			writeJSON(w, http.StatusOK, filesResponse{
@@ -501,6 +649,19 @@ func NewRouter(
 				})
 				return
 			}
+
+			logAuditEventForUser(r, logAuditEvent, audit.Event{
+				Action:          "file_upload",
+				FileID:          &record.ID,
+				FilePublicID:    record.PublicID,
+				FileDisplayName: record.DisplayName,
+				Metadata: map[string]any{
+					"mode": "multipart",
+					"size": record.Size,
+				},
+				IPAddress: r.RemoteAddr,
+				UserAgent: r.UserAgent(),
+			})
 
 			writeJSON(w, http.StatusCreated, filesResponse{
 				Status:    "ok",
@@ -680,6 +841,19 @@ func NewRouter(
 				})
 				return
 			}
+
+			logAuditEventForUser(r, logAuditEvent, audit.Event{
+				Action:          "file_upload",
+				FileID:          &record.ID,
+				FilePublicID:    record.PublicID,
+				FileDisplayName: record.DisplayName,
+				Metadata: map[string]any{
+					"mode": "resumable",
+					"size": record.Size,
+				},
+				IPAddress: r.RemoteAddr,
+				UserAgent: r.UserAgent(),
+			})
 
 			writeJSON(w, http.StatusCreated, uploadSessionResponse{
 				Status:    "ok",
@@ -886,6 +1060,20 @@ func NewRouter(
 			logger.Warn("failed to record download event", slog.String("error", err.Error()), slog.Int64("file_id", info.FileID))
 		}
 
+		logAuditEvent(r.Context(), audit.Event{
+			Action:          "public_download",
+			FileID:          &info.FileID,
+			FilePublicID:    info.PublicID,
+			FileDisplayName: info.FileName,
+			Metadata: map[string]any{
+				"contentType": info.ContentType,
+				"size":        info.Size,
+				"referer":     r.Referer(),
+			},
+			IPAddress: r.RemoteAddr,
+			UserAgent: r.UserAgent(),
+		})
+
 		http.ServeContent(w, r, info.FileName, info.UpdatedAt, fileHandle)
 	}
 
@@ -920,6 +1108,33 @@ func requireAuth(authService *auth.Service) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, auth.WithUser(r, user))
 		})
 	}
+}
+
+func logAuditEventForUser(r *http.Request, writer func(context.Context, audit.Event), event audit.Event) {
+	user, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		return
+	}
+
+	event.ActorUserID = &user.ID
+	event.ActorUsername = user.Username
+	writer(r.Context(), event)
+}
+
+func collectFileNames(items []files.FileRecord) []string {
+	if len(items) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(item.DisplayName) == "" {
+			continue
+		}
+		names = append(names, item.DisplayName)
+	}
+
+	return names
 }
 
 func notImplemented(message string) http.HandlerFunc {

@@ -109,6 +109,27 @@ export interface UploadSessionResponse {
   timestamp?: string
 }
 
+export interface AuditLogRecord {
+  id: number
+  actorUserId?: number
+  actorUsername?: string
+  action: string
+  fileId?: number
+  filePublicId?: string
+  fileDisplayName?: string
+  metadata?: Record<string, unknown>
+  ipHash?: string
+  userAgent?: string
+  createdAt: string
+}
+
+export interface AuditLogsResponse {
+  status: string
+  items?: AuditLogRecord[]
+  message?: string
+  timestamp?: string
+}
+
 export async function getHealth(): Promise<HealthResponse> {
   const response = await fetch(`${env.apiBaseUrl}/api/v1/health`, {
     headers: {
@@ -166,6 +187,10 @@ export function logout(): Promise<AuthResponse> {
 
 export function listFiles(): Promise<FilesResponse> {
   return requestJSON<FilesResponse>('/api/v1/files')
+}
+
+export function listAuditLogs(limit = 50): Promise<AuditLogsResponse> {
+  return requestJSON<AuditLogsResponse>(`/api/v1/audit/logs?limit=${limit}`)
 }
 
 export function getPublicFile(publicId: string): Promise<PublicFileResponse> {

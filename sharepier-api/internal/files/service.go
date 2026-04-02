@@ -89,6 +89,7 @@ type PublicFileRecord struct {
 
 type PublicDownload struct {
 	FileID      int64
+	PublicID    string
 	StorageKey  string
 	FileName    string
 	ContentType string
@@ -320,6 +321,98 @@ func (s *Service) List(ctx context.Context) ([]FileRecord, error) {
 	return items, nil
 }
 
+func (s *Service) GetByID(ctx context.Context, fileID int64) (FileRecord, error) {
+	items, err := s.ListByIDs(ctx, []int64{fileID})
+	if err != nil {
+		return FileRecord{}, err
+	}
+	if len(items) == 0 {
+		return FileRecord{}, ErrNotFound
+	}
+
+	return items[0], nil
+}
+
+func (s *Service) ListByIDs(ctx context.Context, fileIDs []int64) ([]FileRecord, error) {
+	normalized := normalizeFileIDs(fileIDs)
+	if len(normalized) == 0 {
+		return nil, nil
+	}
+
+	args := make([]any, 0, len(normalized))
+	placeholders := make([]string, 0, len(normalized))
+	for _, fileID := range normalized {
+		args = append(args, fileID)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		fmt.Sprintf(
+			`select
+				f.id,
+				f.public_id,
+				f.original_name,
+				f.display_name,
+				f.status,
+				f.visibility,
+				o.content_type,
+				o.size,
+				f.download_count,
+				f.expires_at,
+				f.access_password_hash,
+				f.max_downloads,
+				f.created_at,
+				f.updated_at
+			from files f
+			join objects o on o.id = f.object_id
+			where f.id in (%s)
+			order by f.created_at desc`,
+			strings.Join(placeholders, ", "),
+		),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]FileRecord, 0, len(normalized))
+	for rows.Next() {
+		var item FileRecord
+		var expiresAt sql.NullTime
+		var accessPasswordHash sql.NullString
+		var maxDownloads sql.NullInt64
+		if err := rows.Scan(
+			&item.ID,
+			&item.PublicID,
+			&item.OriginalName,
+			&item.DisplayName,
+			&item.Status,
+			&item.Visibility,
+			&item.ContentType,
+			&item.Size,
+			&item.DownloadCount,
+			&expiresAt,
+			&accessPasswordHash,
+			&maxDownloads,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		item.DownloadURL = s.downloadURL(item.PublicID, item.DisplayName)
+		applyShareMetadata(&item, expiresAt, accessPasswordHash, maxDownloads)
+		items = append(items, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return items, nil
+}
+
 func (s *Service) SetStatus(ctx context.Context, fileID int64, status string) (FileRecord, error) {
 	status = strings.TrimSpace(strings.ToLower(status))
 	switch status {
@@ -513,6 +606,7 @@ func (s *Service) GetPublicDownload(ctx context.Context, publicID, accessToken s
 
 	return PublicDownload{
 		FileID:      state.FileID,
+		PublicID:    state.PublicID,
 		StorageKey:  state.StorageKey,
 		FileName:    state.DisplayName,
 		ContentType: state.ContentType,

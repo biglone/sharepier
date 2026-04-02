@@ -239,10 +239,22 @@ dt {
 }
 
 .auth-card,
-.download-card {
+.download-card,
+.audit-card {
   grid-column: 1 / -1;
   display: grid;
   gap: 24px;
+}
+
+.activity-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.activity-section {
+  display: grid;
+  gap: 12px;
 }
 
 .auth-form {
@@ -633,7 +645,8 @@ dt {
 
   .stat-grid,
   .kv-grid,
-  .public-stat-grid {
+  .public-stat-grid,
+  .activity-columns {
     grid-template-columns: 1fr;
   }
 

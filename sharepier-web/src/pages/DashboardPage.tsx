@@ -10,12 +10,14 @@ import {
   getCurrentUser,
   getHealth,
   getResumableUploadSession,
+  listAuditLogs,
   listFiles,
   logout,
   setFileStatus,
   updateSharePolicy,
   uploadResumableChunk,
   uploadFile,
+  type AuditLogRecord,
   type AuthUser,
   type FileRecord,
   type HealthResponse,
@@ -26,12 +28,13 @@ import { env } from '../lib/env'
 type LoadState = 'idle' | 'loading' | 'success' | 'error'
 type AuthState = 'idle' | 'loading' | 'authenticated' | 'unauthenticated' | 'error'
 type FilesState = 'idle' | 'loading' | 'success' | 'error'
+type AuditState = 'idle' | 'loading' | 'success' | 'error'
 type FileStatusFilter = 'all' | 'active' | 'disabled'
 
 const milestones = [
   'M0-M10 已完成：骨架、登录、普通上传、分片上传/续传、搜索/筛选、批量操作、下载、禁用/删除、正式域名、分享页、静态前端服务、S3 兼容对象存储切换能力',
   'M11 已完成：分享策略（过期、密码、单次下载）',
-  'M12: 审计日志与上传/下载操作记录页',
+  'M12 已完成：审计日志与上传/下载操作记录页',
 ]
 
 const resumableUploadStorageKey = 'sharepier.resumable-upload'
@@ -54,6 +57,9 @@ export function DashboardPage() {
   const [files, setFiles] = useState<FileRecord[]>([])
   const [filesState, setFilesState] = useState<FilesState>('idle')
   const [filesError, setFilesError] = useState<string | null>(null)
+  const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([])
+  const [auditState, setAuditState] = useState<AuditState>('idle')
+  const [auditError, setAuditError] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState<FileStatusFilter>('all')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -100,6 +106,14 @@ export function DashboardPage() {
     filteredFiles.every((item) => selectedFileIds.includes(item.id))
 
   const actionsBusy = batchActionBusy || fileActionBusyId !== null || sharePolicyBusyId !== null
+  const adminAuditLogs = useMemo(
+    () => auditLogs.filter((item) => item.action !== 'public_download').slice(0, 12),
+    [auditLogs],
+  )
+  const downloadAuditLogs = useMemo(
+    () => auditLogs.filter((item) => item.action === 'public_download').slice(0, 12),
+    [auditLogs],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -158,9 +172,11 @@ export function DashboardPage() {
   useEffect(() => {
     if (authState !== 'authenticated') {
       setFiles([])
+      setAuditLogs([])
       setSelectedFileIds([])
       setSharePolicyDrafts({})
       setFilesState('idle')
+      setAuditState('idle')
       return
     }
 
@@ -183,7 +199,26 @@ export function DashboardPage() {
       }
     }
 
+    async function loadAuditEntries() {
+      setAuditState('loading')
+      try {
+        const result = await listAuditLogs(80)
+        if (!cancelled) {
+          setAuditLogs(result.items ?? [])
+          setAuditError(null)
+          setAuditState('success')
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setAuditLogs([])
+          setAuditError(err instanceof Error ? err.message : 'Unknown error')
+          setAuditState('error')
+        }
+      }
+    }
+
     void loadFiles()
+    void loadAuditEntries()
 
     return () => {
       cancelled = true
@@ -205,6 +240,30 @@ export function DashboardPage() {
   async function refreshFiles() {
     const next = await listFiles()
     applyFiles(next.items ?? [])
+  }
+
+  async function refreshAuditLogs() {
+    setAuditState('loading')
+    try {
+      const next = await listAuditLogs(80)
+      setAuditLogs(next.items ?? [])
+      setAuditError(null)
+      setAuditState('success')
+    } catch (err) {
+      setAuditLogs([])
+      setAuditError(err instanceof Error ? err.message : 'Unknown error')
+      setAuditState('error')
+      throw err
+    }
+  }
+
+  async function refreshAdminData() {
+    await refreshFiles()
+    try {
+      await refreshAuditLogs()
+    } catch {
+      // 审计日志刷新失败时，不影响主操作结果提示
+    }
   }
 
   function getSharePolicyDraft(item: FileRecord): SharePolicyDraft {
@@ -231,9 +290,11 @@ export function DashboardPage() {
       setAuthError('当前未登录')
       setAuthState('unauthenticated')
       setFiles([])
+      setAuditLogs([])
       setSelectedFileIds([])
       setSharePolicyDrafts({})
       setFilesState('idle')
+      setAuditState('idle')
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : 'Unknown error')
       setAuthState('error')
@@ -272,6 +333,7 @@ export function DashboardPage() {
           [item.id]: createSharePolicyDraft(result.item),
         }))
       }
+      await refreshAuditLogs()
       setFileActionMessage(`已更新 ${item.displayName} 的分享策略`)
     } catch (err) {
       setFileActionMessage(err instanceof Error ? err.message : '更新分享策略失败')
@@ -296,7 +358,7 @@ export function DashboardPage() {
       setDisplayName('')
       setUploadMessage(uploaded ? `上传完成：${uploaded.displayName}` : '上传完成')
 
-      await refreshFiles()
+      await refreshAdminData()
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : '上传失败')
     } finally {
@@ -421,6 +483,7 @@ export function DashboardPage() {
       setResumableFile(null)
       setResumableDisplayName('')
       setResumableMessage(completed.item ? `分片上传完成：${completed.item.displayName}` : '分片上传完成')
+      await refreshAdminData()
     } catch (err) {
       setResumableMessage(err instanceof Error ? `${err.message}。会话已保留，可继续续传。` : '分片上传失败，会话已保留。')
     } finally {
@@ -434,7 +497,7 @@ export function DashboardPage() {
     setFileActionMessage(null)
     try {
       await setFileStatus(item.id, nextStatus)
-      await refreshFiles()
+      await refreshAdminData()
       setFileActionMessage(nextStatus === 'disabled' ? `已禁用：${item.displayName}` : `已重新启用：${item.displayName}`)
     } catch (err) {
       setFileActionMessage(err instanceof Error ? err.message : '更新文件状态失败')
@@ -453,7 +516,7 @@ export function DashboardPage() {
     setFileActionMessage(null)
     try {
       await deleteFile(item.id)
-      await refreshFiles()
+      await refreshAdminData()
       setSelectedFileIds((current) => current.filter((id) => id !== item.id))
       setFileActionMessage(`已删除：${item.displayName}`)
     } catch (err) {
@@ -473,7 +536,7 @@ export function DashboardPage() {
     try {
       const result = await batchUpdateFiles('set_status', selectedFileIds, status)
       const affectedCount = result.affectedCount ?? selectedFileIds.length
-      await refreshFiles()
+      await refreshAdminData()
       setSelectedFileIds([])
       setFileActionMessage(status === 'disabled' ? `已批量禁用 ${affectedCount} 个文件` : `已批量启用 ${affectedCount} 个文件`)
     } catch (err) {
@@ -498,7 +561,7 @@ export function DashboardPage() {
     try {
       const result = await batchUpdateFiles('delete', selectedFileIds)
       const affectedCount = result.affectedCount ?? selectedFileIds.length
-      await refreshFiles()
+      await refreshAdminData()
       setSelectedFileIds([])
       setFileActionMessage(`已批量删除 ${affectedCount} 个文件`)
     } catch (err) {
@@ -1008,6 +1071,98 @@ export function DashboardPage() {
         ) : null}
       </section>
 
+      <section className="card audit-card">
+        <div className="section-title-row">
+          <div>
+            <p className="eyebrow">Activity</p>
+            <h3>操作记录</h3>
+          </div>
+          <span className={`status-pill status-${auditState === 'success' ? 'success' : auditState === 'loading' ? 'loading' : auditState === 'error' ? 'error' : 'idle'}`}>
+            {auditState}
+          </span>
+        </div>
+
+        {authState === 'authenticated' ? (
+          <>
+            {auditState === 'loading' ? <p>正在拉取操作记录。</p> : null}
+            {auditState === 'error' ? <p className="error-text">{auditError}</p> : null}
+            {auditState === 'success' ? (
+              <div className="activity-columns">
+                <div className="activity-section">
+                  <div className="section-title-row">
+                    <div>
+                      <p className="eyebrow">Audit</p>
+                      <h3>管理与上传日志</h3>
+                    </div>
+                    <span className="status-pill status-success">{adminAuditLogs.length} 条</span>
+                  </div>
+
+                  {adminAuditLogs.length > 0 ? (
+                    <div className="files-list">
+                      {adminAuditLogs.map((item) => (
+                        <article key={item.id} className="file-item">
+                          <div className="file-item-header">
+                            <div className="file-main">
+                              <strong>{formatAuditActionLabel(item.action)}</strong>
+                              <span>{formatAuditActor(item)} · {formatDateTime(item.createdAt)}</span>
+                              <span>{formatAuditTarget(item)}</span>
+                              <span>{formatAuditSummary(item)}</span>
+                            </div>
+                            <span className="status-pill status-idle">{formatAuditActionBadge(item.action)}</span>
+                          </div>
+                          <p className="subtle-text">
+                            {item.ipHash ? `IP Hash: ${truncateHash(item.ipHash)}` : 'IP Hash: -'}
+                            {item.userAgent ? ` · UA: ${truncateText(item.userAgent, 72)}` : ''}
+                          </p>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>暂无管理或上传日志。</p>
+                  )}
+                </div>
+
+                <div className="activity-section">
+                  <div className="section-title-row">
+                    <div>
+                      <p className="eyebrow">Downloads</p>
+                      <h3>公开下载记录</h3>
+                    </div>
+                    <span className="status-pill status-success">{downloadAuditLogs.length} 条</span>
+                  </div>
+
+                  {downloadAuditLogs.length > 0 ? (
+                    <div className="files-list">
+                      {downloadAuditLogs.map((item) => (
+                        <article key={item.id} className="file-item">
+                          <div className="file-item-header">
+                            <div className="file-main">
+                              <strong>{formatAuditActionLabel(item.action)}</strong>
+                              <span>{formatAuditActor(item)} · {formatDateTime(item.createdAt)}</span>
+                              <span>{formatAuditTarget(item)}</span>
+                              <span>{formatAuditSummary(item)}</span>
+                            </div>
+                            <span className="status-pill status-success">{formatAuditActionBadge(item.action)}</span>
+                          </div>
+                          <p className="subtle-text">
+                            {item.ipHash ? `IP Hash: ${truncateHash(item.ipHash)}` : 'IP Hash: -'}
+                            {item.userAgent ? ` · UA: ${truncateText(item.userAgent, 72)}` : ''}
+                          </p>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>暂无公开下载记录。</p>
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <p>请先登录管理员账号后查看操作记录。</p>
+        )}
+      </section>
+
       <section className="card">
         <p className="eyebrow">Milestones</p>
         <h3>推荐开发顺序</h3>
@@ -1091,6 +1246,128 @@ function formatBytes(size: number): string {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`
 }
 
+function formatAuditActionLabel(action: string): string {
+  switch (action) {
+    case 'auth_login':
+      return '管理员登录'
+    case 'auth_login_failed':
+      return '登录失败'
+    case 'auth_logout':
+      return '管理员登出'
+    case 'file_upload':
+      return '文件上传'
+    case 'file_status_change':
+      return '文件状态变更'
+    case 'file_delete':
+      return '删除文件'
+    case 'file_batch_set_status':
+      return '批量状态变更'
+    case 'file_batch_delete':
+      return '批量删除'
+    case 'file_share_policy_update':
+      return '分享策略更新'
+    case 'public_download':
+      return '公开下载'
+    default:
+      return action
+    }
+}
+
+function formatAuditActionBadge(action: string): string {
+  switch (action) {
+    case 'public_download':
+      return 'download'
+    case 'file_upload':
+      return 'upload'
+    case 'auth_login':
+    case 'auth_logout':
+    case 'auth_login_failed':
+      return 'auth'
+    default:
+      return 'audit'
+  }
+}
+
+function formatAuditActor(item: AuditLogRecord): string {
+  if (item.action === 'public_download') {
+    return '公开访客'
+  }
+
+  return item.actorUsername?.trim() || '系统'
+}
+
+function formatAuditTarget(item: AuditLogRecord): string {
+  if (item.fileDisplayName) {
+    return item.filePublicId ? `${item.fileDisplayName} · ${item.filePublicId}` : item.fileDisplayName
+  }
+
+  const fileNames = getStringArrayMeta(item.metadata, 'fileNames')
+  if (fileNames.length > 0) {
+    return fileNames.length > 3
+      ? `${fileNames.slice(0, 3).join('、')} 等 ${fileNames.length} 项`
+      : fileNames.join('、')
+  }
+
+  return '系统级操作'
+}
+
+function formatAuditSummary(item: AuditLogRecord): string {
+  switch (item.action) {
+    case 'auth_login_failed':
+      return item.actorUsername ? `账号 ${item.actorUsername} 登录失败` : '登录失败'
+    case 'auth_login':
+      return '管理员登录成功'
+    case 'auth_logout':
+      return '管理员主动退出会话'
+    case 'file_upload': {
+      const mode = getStringMeta(item.metadata, 'mode')
+      const size = getNumberMeta(item.metadata, 'size')
+      const uploadMode = mode === 'resumable' ? '分片上传' : '普通上传'
+      return size ? `${uploadMode} · ${formatBytes(size)}` : uploadMode
+    }
+    case 'file_status_change': {
+      const from = getStringMeta(item.metadata, 'from')
+      const to = getStringMeta(item.metadata, 'to')
+      return from && to ? `${from} → ${to}` : '文件状态已更新'
+    }
+    case 'file_delete': {
+      const size = getNumberMeta(item.metadata, 'size')
+      return size ? `已删除 · ${formatBytes(size)}` : '文件已删除'
+    }
+    case 'file_batch_set_status': {
+      const affectedCount = getNumberMeta(item.metadata, 'affectedCount')
+      const status = getStringMeta(item.metadata, 'status')
+      return `共 ${affectedCount ?? 0} 项${status ? ` → ${status}` : ''}`
+    }
+    case 'file_batch_delete': {
+      const affectedCount = getNumberMeta(item.metadata, 'affectedCount')
+      return `共删除 ${affectedCount ?? 0} 项`
+    }
+    case 'file_share_policy_update': {
+      const parts = ['分享策略已更新']
+      const maxDownloads = getNumberMeta(item.metadata, 'maxDownloads')
+      const passwordProtected = getBooleanMeta(item.metadata, 'passwordProtected')
+      const expiresAt = getDateMeta(item.metadata, 'expiresAt')
+      if (typeof maxDownloads === 'number') {
+        parts.push(`限制 ${maxDownloads} 次下载`)
+      }
+      if (passwordProtected === true) {
+        parts.push('启用访问密码')
+      }
+      if (expiresAt) {
+        parts.push(`到 ${formatDateTime(expiresAt)} 失效`)
+      }
+      return parts.join(' · ')
+    }
+    case 'public_download': {
+      const size = getNumberMeta(item.metadata, 'size')
+      return size ? `下载成功 · ${formatBytes(size)}` : '下载成功'
+    }
+    default:
+      return '操作已记录'
+  }
+}
+
 function buildShareUrl(publicId: string, fileName: string): string {
   return new URL(`/share/${publicId}/${encodeURIComponent(fileName)}`, window.location.origin).href
 }
@@ -1170,4 +1447,49 @@ function formatDateTime(value: string): string {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(date)
+}
+
+function getStringMeta(metadata: Record<string, unknown> | undefined, key: string): string | null {
+  const value = metadata?.[key]
+  return typeof value === 'string' && value.trim() !== '' ? value : null
+}
+
+function getNumberMeta(metadata: Record<string, unknown> | undefined, key: string): number | null {
+  const value = metadata?.[key]
+  return typeof value === 'number' ? value : null
+}
+
+function getBooleanMeta(metadata: Record<string, unknown> | undefined, key: string): boolean | null {
+  const value = metadata?.[key]
+  return typeof value === 'boolean' ? value : null
+}
+
+function getDateMeta(metadata: Record<string, unknown> | undefined, key: string): string | null {
+  const value = metadata?.[key]
+  return typeof value === 'string' && value.trim() !== '' ? value : null
+}
+
+function getStringArrayMeta(metadata: Record<string, unknown> | undefined, key: string): string[] {
+  const value = metadata?.[key]
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+}
+
+function truncateHash(value?: string): string {
+  if (!value) {
+    return '-'
+  }
+
+  return value.length > 12 ? `${value.slice(0, 12)}…` : value
+}
+
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value
+  }
+
+  return `${value.slice(0, maxLength)}…`
 }

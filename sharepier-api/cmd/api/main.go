@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"sharepier-api/internal/audit"
 	"sharepier-api/internal/auth"
 	"sharepier-api/internal/config"
 	"sharepier-api/internal/db"
@@ -64,6 +65,7 @@ func main() {
 	}
 
 	authService := auth.NewService(database, cfg, logger)
+	auditService := audit.NewService(database)
 	fileService := files.NewService(
 		database,
 		store,
@@ -73,7 +75,7 @@ func main() {
 		cfg.ShareAccessSecret,
 		cfg.ShareAccessTTL,
 	)
-	router := httpx.NewRouter(cfg, logger, store, authService, fileService)
+	router := httpx.NewRouter(cfg, logger, store, authService, fileService, auditService)
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 
 	srv := &http.Server{
