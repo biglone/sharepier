@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"time"
 )
@@ -28,7 +30,11 @@ type Event struct {
 }
 
 type ListParams struct {
-	Limit int
+	Limit  int
+	Action string
+	Query  string
+	From   *time.Time
+	To     *time.Time
 }
 
 type Record struct {
@@ -109,9 +115,37 @@ func (s *Service) List(ctx context.Context, params ListParams) ([]Record, error)
 		limit = 200
 	}
 
-	rows, err := s.db.QueryContext(
-		ctx,
-		`select
+	action := strings.TrimSpace(strings.ToLower(params.Action))
+	query := strings.TrimSpace(strings.ToLower(params.Query))
+
+	conditions := make([]string, 0, 4)
+	args := make([]any, 0, 5)
+
+	if action != "" {
+		args = append(args, action)
+		conditions = append(conditions, fmt.Sprintf("action = $%d", len(args)))
+	}
+	if query != "" {
+		args = append(args, "%"+query+"%")
+		index := len(args)
+		conditions = append(conditions, fmt.Sprintf(`(
+			lower(coalesce(actor_username, '')) like $%[1]d or
+			lower(coalesce(action, '')) like $%[1]d or
+			lower(coalesce(file_public_id, '')) like $%[1]d or
+			lower(coalesce(file_display_name, '')) like $%[1]d
+		)`, index))
+	}
+	if params.From != nil {
+		args = append(args, params.From.UTC())
+		conditions = append(conditions, fmt.Sprintf("created_at >= $%d", len(args)))
+	}
+	if params.To != nil {
+		args = append(args, params.To.UTC())
+		conditions = append(conditions, fmt.Sprintf("created_at <= $%d", len(args)))
+	}
+
+	queryBuilder := strings.Builder{}
+	queryBuilder.WriteString(`select
 			id,
 			actor_user_id,
 			actor_username,
@@ -123,10 +157,18 @@ func (s *Service) List(ctx context.Context, params ListParams) ([]Record, error)
 			ip_hash,
 			user_agent,
 			created_at
-		from audit_logs
-		order by created_at desc, id desc
-		limit $1`,
-		limit,
+		from audit_logs`)
+	if len(conditions) > 0 {
+		queryBuilder.WriteString("\nwhere ")
+		queryBuilder.WriteString(strings.Join(conditions, "\n  and "))
+	}
+	args = append(args, limit)
+	queryBuilder.WriteString(fmt.Sprintf("\norder by created_at desc, id desc\nlimit $%d", len(args)))
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		queryBuilder.String(),
+		args...,
 	)
 	if err != nil {
 		return nil, err
@@ -201,6 +243,15 @@ func (s *Service) List(ctx context.Context, params ListParams) ([]Record, error)
 	return items, nil
 }
 
+func ValidActions() []string {
+	return slices.Clone(validActions)
+}
+
+func IsValidAction(value string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	return value == "" || slices.Contains(validActions, value)
+}
+
 func normalizeIPAddress(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -226,4 +277,17 @@ func hashString(value string) string {
 
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+var validActions = []string{
+	"auth_login",
+	"auth_login_failed",
+	"auth_logout",
+	"file_upload",
+	"file_status_change",
+	"file_delete",
+	"file_batch_set_status",
+	"file_batch_delete",
+	"file_share_policy_update",
+	"public_download",
 }

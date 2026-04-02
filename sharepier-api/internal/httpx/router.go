@@ -1,7 +1,10 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"mime"
@@ -232,6 +235,7 @@ func NewRouter(
 		})
 
 		r.With(requireAuth(authService)).Get("/audit/logs", func(w http.ResponseWriter, r *http.Request) {
+			format := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("format")))
 			limit := 50
 			if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 				if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
@@ -239,13 +243,71 @@ func NewRouter(
 				}
 			}
 
-			items, err := auditService.List(r.Context(), audit.ListParams{Limit: limit})
+			action := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("action")))
+			if !audit.IsValidAction(action) {
+				writeJSON(w, http.StatusBadRequest, auditLogsResponse{
+					Status:    "bad_request",
+					Message:   "unsupported audit action",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			queryText := strings.TrimSpace(r.URL.Query().Get("query"))
+			var (
+				from *time.Time
+				to   *time.Time
+			)
+			if raw := strings.TrimSpace(r.URL.Query().Get("from")); raw != "" {
+				parsed, err := time.Parse(time.RFC3339, raw)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, auditLogsResponse{
+						Status:    "bad_request",
+						Message:   "invalid from value",
+						Timestamp: time.Now().UTC().Format(time.RFC3339),
+					})
+					return
+				}
+				from = &parsed
+			}
+			if raw := strings.TrimSpace(r.URL.Query().Get("to")); raw != "" {
+				parsed, err := time.Parse(time.RFC3339, raw)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, auditLogsResponse{
+						Status:    "bad_request",
+						Message:   "invalid to value",
+						Timestamp: time.Now().UTC().Format(time.RFC3339),
+					})
+					return
+				}
+				to = &parsed
+			}
+
+			items, err := auditService.List(r.Context(), audit.ListParams{
+				Limit:  limit,
+				Action: action,
+				Query:  queryText,
+				From:   from,
+				To:     to,
+			})
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, auditLogsResponse{
 					Status:    "error",
 					Message:   "failed to load audit logs",
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
 				})
+				return
+			}
+
+			if format == "csv" {
+				if err := writeAuditLogsCSV(w, items); err != nil {
+					logger.Warn("failed to export audit logs csv", slog.String("error", err.Error()))
+					writeJSON(w, http.StatusInternalServerError, auditLogsResponse{
+						Status:    "error",
+						Message:   "failed to export audit logs",
+						Timestamp: time.Now().UTC().Format(time.RFC3339),
+					})
+				}
 				return
 			}
 
@@ -1135,6 +1197,72 @@ func collectFileNames(items []files.FileRecord) []string {
 	}
 
 	return names
+}
+
+func writeAuditLogsCSV(w http.ResponseWriter, items []audit.Record) error {
+	buffer := &bytes.Buffer{}
+	writer := csv.NewWriter(buffer)
+
+	if err := writer.Write([]string{
+		"created_at",
+		"action",
+		"actor_username",
+		"actor_user_id",
+		"file_display_name",
+		"file_public_id",
+		"file_id",
+		"ip_hash",
+		"user_agent",
+		"metadata_json",
+	}); err != nil {
+		return err
+	}
+
+	for _, item := range items {
+		metadataJSON := "{}"
+		if len(item.Metadata) > 0 {
+			encoded, err := json.Marshal(item.Metadata)
+			if err != nil {
+				return err
+			}
+			metadataJSON = string(encoded)
+		}
+
+		if err := writer.Write([]string{
+			item.CreatedAt.UTC().Format(time.RFC3339),
+			item.Action,
+			item.ActorUsername,
+			formatOptionalInt64(item.ActorUserID),
+			item.FileDisplayName,
+			item.FilePublicID,
+			formatOptionalInt64(item.FileID),
+			item.IPHash,
+			item.UserAgent,
+			metadataJSON,
+		}); err != nil {
+			return err
+		}
+	}
+
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return err
+	}
+
+	filename := "sharepier-audit-logs-" + time.Now().UTC().Format("20060102-150405") + ".csv"
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+	w.WriteHeader(http.StatusOK)
+	_, err := w.Write(buffer.Bytes())
+	return err
+}
+
+func formatOptionalInt64(value *int64) string {
+	if value == nil {
+		return ""
+	}
+
+	return strconv.FormatInt(*value, 10)
 }
 
 func notImplemented(message string) http.HandlerFunc {

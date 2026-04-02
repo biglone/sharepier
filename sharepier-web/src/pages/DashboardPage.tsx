@@ -7,6 +7,7 @@ import {
   completeResumableUpload,
   createResumableUploadSession,
   deleteFile,
+  getAuditLogsExportUrl,
   getCurrentUser,
   getHealth,
   getResumableUploadSession,
@@ -30,6 +31,18 @@ type AuthState = 'idle' | 'loading' | 'authenticated' | 'unauthenticated' | 'err
 type FilesState = 'idle' | 'loading' | 'success' | 'error'
 type AuditState = 'idle' | 'loading' | 'success' | 'error'
 type FileStatusFilter = 'all' | 'active' | 'disabled'
+type AuditActionFilter =
+  | 'all'
+  | 'auth_login'
+  | 'auth_login_failed'
+  | 'auth_logout'
+  | 'file_upload'
+  | 'file_status_change'
+  | 'file_delete'
+  | 'file_batch_set_status'
+  | 'file_batch_delete'
+  | 'file_share_policy_update'
+  | 'public_download'
 
 const milestones = [
   'M0-M10 已完成：骨架、登录、普通上传、分片上传/续传、搜索/筛选、批量操作、下载、禁用/删除、正式域名、分享页、静态前端服务、S3 兼容对象存储切换能力',
@@ -38,6 +51,7 @@ const milestones = [
 ]
 
 const resumableUploadStorageKey = 'sharepier.resumable-upload'
+const auditLogsLimit = 80
 
 type SharePolicyDraft = {
   expiresAt: string
@@ -60,6 +74,10 @@ export function DashboardPage() {
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([])
   const [auditState, setAuditState] = useState<AuditState>('idle')
   const [auditError, setAuditError] = useState<string | null>(null)
+  const [auditQuery, setAuditQuery] = useState('')
+  const [auditActionFilter, setAuditActionFilter] = useState<AuditActionFilter>('all')
+  const [auditFrom, setAuditFrom] = useState('')
+  const [auditTo, setAuditTo] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState<FileStatusFilter>('all')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -202,7 +220,7 @@ export function DashboardPage() {
     async function loadAuditEntries() {
       setAuditState('loading')
       try {
-        const result = await listAuditLogs(80)
+        const result = await listAuditLogs({ limit: auditLogsLimit })
         if (!cancelled) {
           setAuditLogs(result.items ?? [])
           setAuditError(null)
@@ -245,7 +263,7 @@ export function DashboardPage() {
   async function refreshAuditLogs() {
     setAuditState('loading')
     try {
-      const next = await listAuditLogs(80)
+      const next = await listAuditLogs(buildAuditQueryParams())
       setAuditLogs(next.items ?? [])
       setAuditError(null)
       setAuditState('success')
@@ -264,6 +282,51 @@ export function DashboardPage() {
     } catch {
       // 审计日志刷新失败时，不影响主操作结果提示
     }
+  }
+
+  function buildAuditQueryParams() {
+    return {
+      limit: auditLogsLimit,
+      action: auditActionFilter,
+      query: auditQuery,
+      from: auditFrom ? new Date(auditFrom).toISOString() : undefined,
+      to: auditTo ? new Date(auditTo).toISOString() : undefined,
+    }
+  }
+
+  async function handleApplyAuditFilters() {
+    try {
+      await refreshAuditLogs()
+    } catch {
+      // error state handled in refreshAuditLogs
+    }
+  }
+
+  function handleResetAuditFilters() {
+    setAuditQuery('')
+    setAuditActionFilter('all')
+    setAuditFrom('')
+    setAuditTo('')
+    setAuditState('loading')
+    void listAuditLogs({ limit: auditLogsLimit })
+      .then((result) => {
+        setAuditLogs(result.items ?? [])
+        setAuditError(null)
+        setAuditState('success')
+      })
+      .catch((err) => {
+        setAuditLogs([])
+        setAuditError(err instanceof Error ? err.message : 'Unknown error')
+        setAuditState('error')
+      })
+  }
+
+  function handleExportAuditLogs() {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    window.open(getAuditLogsExportUrl(buildAuditQueryParams()), '_blank', 'noopener,noreferrer')
   }
 
   function getSharePolicyDraft(item: FileRecord): SharePolicyDraft {
@@ -1084,6 +1147,73 @@ export function DashboardPage() {
 
         {authState === 'authenticated' ? (
           <>
+            <div className="audit-toolbar">
+              <label className="filter-field">
+                搜索审计记录
+                <input
+                  type="search"
+                  placeholder="按用户名、动作、文件名或 Public ID 筛选"
+                  value={auditQuery}
+                  onChange={(event) => setAuditQuery(event.target.value)}
+                />
+              </label>
+
+              <label className="filter-field">
+                动作筛选
+                <select
+                  value={auditActionFilter}
+                  onChange={(event) => setAuditActionFilter(event.target.value as AuditActionFilter)}
+                >
+                  <option value="all">全部动作</option>
+                  <option value="auth_login">管理员登录</option>
+                  <option value="auth_login_failed">登录失败</option>
+                  <option value="auth_logout">管理员登出</option>
+                  <option value="file_upload">文件上传</option>
+                  <option value="file_status_change">文件状态变更</option>
+                  <option value="file_delete">单文件删除</option>
+                  <option value="file_batch_set_status">批量状态变更</option>
+                  <option value="file_batch_delete">批量删除</option>
+                  <option value="file_share_policy_update">分享策略更新</option>
+                  <option value="public_download">公开下载</option>
+                </select>
+              </label>
+
+              <label className="filter-field">
+                起始时间
+                <input
+                  type="datetime-local"
+                  value={auditFrom}
+                  onChange={(event) => setAuditFrom(event.target.value)}
+                />
+              </label>
+
+              <label className="filter-field">
+                结束时间
+                <input
+                  type="datetime-local"
+                  value={auditTo}
+                  onChange={(event) => setAuditTo(event.target.value)}
+                />
+              </label>
+
+              <div className="audit-toolbar-actions">
+                <button type="button" className="ghost-button" onClick={() => void handleApplyAuditFilters()}>
+                  应用筛选
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={auditQuery === '' && auditActionFilter === 'all' && auditFrom === '' && auditTo === ''}
+                  onClick={handleResetAuditFilters}
+                >
+                  重置筛选
+                </button>
+                <button type="button" onClick={handleExportAuditLogs}>
+                  导出 CSV
+                </button>
+              </div>
+            </div>
+
             {auditState === 'loading' ? <p>正在拉取操作记录。</p> : null}
             {auditState === 'error' ? <p className="error-text">{auditError}</p> : null}
             {auditState === 'success' ? (

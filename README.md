@@ -4,7 +4,7 @@
 
 ## 当前骨架
 
-- `sharepier-web`: `React + Vite + TypeScript` 管理台、搜索/筛选/批量操作、分享策略配置、审计/下载操作记录与公开分享页，当前走静态构建产物服务
+- `sharepier-web`: `React + Vite + TypeScript` 管理台、搜索/筛选/批量操作、分享策略配置、审计/下载操作记录（含筛选 / CSV 导出）与公开分享页，当前走静态构建产物服务
 - `sharepier-api`: `Go + chi` API、管理员登录、普通上传、分片上传/续传、列表、禁用、删除、公开下载、公开文件元数据、分享策略鉴权、审计日志，以及 `local/S3-compatible` 对象存储后端
 - `docker-compose.yml`: 本地开发依赖与容器化运行入口
 - `cloudflared/config.yml.example`: Tunnel 配置示例
@@ -192,5 +192,5 @@ docker compose up -d sharepier-api
 
 - 将管理员密码替换成你自己的长期密码
 - 将 `SHAREPIER_SHARE_ACCESS_SECRET` 换成独立随机长串
-- 增加审计日志筛选 / 导出能力
 - 增加存储配额与用量统计
+- 增加审计日志分页与更多筛选维度

@@ -257,6 +257,19 @@ dt {
   gap: 12px;
 }
 
+.audit-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) repeat(3, minmax(180px, 0.8fr)) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.audit-toolbar-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .auth-form {
   display: grid;
   gap: 16px;
@@ -656,6 +669,10 @@ dt {
   }
 
   .files-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-toolbar {
     grid-template-columns: 1fr;
   }
 

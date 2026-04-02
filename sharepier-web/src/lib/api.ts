@@ -130,6 +130,14 @@ export interface AuditLogsResponse {
   timestamp?: string
 }
 
+export interface AuditLogListParams {
+  limit?: number
+  action?: string
+  query?: string
+  from?: string
+  to?: string
+}
+
 export async function getHealth(): Promise<HealthResponse> {
   const response = await fetch(`${env.apiBaseUrl}/api/v1/health`, {
     headers: {
@@ -189,8 +197,14 @@ export function listFiles(): Promise<FilesResponse> {
   return requestJSON<FilesResponse>('/api/v1/files')
 }
 
-export function listAuditLogs(limit = 50): Promise<AuditLogsResponse> {
-  return requestJSON<AuditLogsResponse>(`/api/v1/audit/logs?limit=${limit}`)
+export function listAuditLogs(params: AuditLogListParams = {}): Promise<AuditLogsResponse> {
+  return requestJSON<AuditLogsResponse>(`/api/v1/audit/logs?${buildAuditLogQuery(params).toString()}`)
+}
+
+export function getAuditLogsExportUrl(params: AuditLogListParams = {}): string {
+  const search = buildAuditLogQuery(params)
+  search.set('format', 'csv')
+  return `${env.apiBaseUrl}/api/v1/audit/logs?${search.toString()}`
 }
 
 export function getPublicFile(publicId: string): Promise<PublicFileResponse> {
@@ -310,4 +324,24 @@ export async function uploadFile(file: File, displayName: string): Promise<Files
   }
 
   return payload as FilesResponse
+}
+
+function buildAuditLogQuery(params: AuditLogListParams): URLSearchParams {
+  const search = new URLSearchParams()
+  search.set('limit', String(params.limit && params.limit > 0 ? params.limit : 50))
+
+  if (params.action && params.action.trim() !== '' && params.action !== 'all') {
+    search.set('action', params.action.trim())
+  }
+  if (params.query && params.query.trim() !== '') {
+    search.set('query', params.query.trim())
+  }
+  if (params.from && params.from.trim() !== '') {
+    search.set('from', params.from.trim())
+  }
+  if (params.to && params.to.trim() !== '') {
+    search.set('to', params.to.trim())
+  }
+
+  return search
 }
