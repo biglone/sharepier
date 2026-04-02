@@ -5,7 +5,7 @@
 ## 当前骨架
 
 - `sharepier-web`: `React + Vite + TypeScript` 管理台、搜索/筛选/批量操作、分享策略配置与公开分享页，当前走静态构建产物服务
-- `sharepier-api`: `Go + chi` API、管理员登录、普通上传、分片上传/续传、列表、禁用、删除、公开下载、公开文件元数据与分享策略鉴权
+- `sharepier-api`: `Go + chi` API、管理员登录、普通上传、分片上传/续传、列表、禁用、删除、公开下载、公开文件元数据、分享策略鉴权，以及 `local/S3-compatible` 对象存储后端
 - `docker-compose.yml`: 本地开发依赖与容器化运行入口
 - `cloudflared/config.yml.example`: Tunnel 配置示例
 - `sharepier-api/migrations/0001_init.sql`: 首版数据库表结构草稿
@@ -45,10 +45,12 @@ Compose 已为容器注入 `host.docker.internal -> host-gateway`，便于这种
 
 - `postgres` 服务复用本地已有的 `golang:1.26.1-alpine` 镜像，并在容器启动时安装 PostgreSQL 运行时，绕开某些环境下 `dockerproxy.com` / Docker Hub mirror 拉取 `postgres:17-alpine` 失败的问题
 - 运行时安装默认使用清华 Alpine 镜像源，可通过 `SHAREPIER_ALPINE_MAIN_REPOSITORY` / `SHAREPIER_ALPINE_COMMUNITY_REPOSITORY` 覆盖
+- `sharepier-api` 默认 `GOPROXY` 已切到 `https://goproxy.cn,direct`，避免容器内拉取较大 Go 依赖时频繁遇到 `unexpected EOF`
 - `sharepier-web` 默认使用 `npm ci`，并通过 `NPM_CONFIG_REGISTRY` 指向 `https://registry.npmmirror.com`，减少容器内首次安装依赖耗时
 - `sharepier-web` 使用 `node:22-alpine`，容器启动后会先构建静态资源，再用 Node 静态文件服务对外提供页面
 - 默认普通上传入口受 `SHAREPIER_MAX_UPLOAD_SIZE` 控制；大文件分片上传走独立会话，单片大小由 `SHAREPIER_RESUMABLE_CHUNK_SIZE` 控制，会话过期时间由 `SHAREPIER_UPLOAD_SESSION_TTL` 控制
 - 分享策略支持三类限制：失效时间、访问密码、最大下载次数；密码保护通过短期 HttpOnly Cookie 解锁，密钥由 `SHAREPIER_SHARE_ACCESS_SECRET` 提供
+- 存储后端默认是 `local`；将 `SHAREPIER_STORAGE_BACKEND=s3` 后，可切换到任意兼容 `S3 API` 的对象存储（如 `MinIO`、`AWS S3`、`Cloudflare R2`）
 
 启动后默认地址：
 
@@ -137,8 +139,57 @@ curl -I https://sharepier.biglone.tech
 curl -I https://sharepier.biglone.tech/api/v1/health
 ```
 
+## S3 兼容对象存储
+
+如果你准备把对象文件切到 `MinIO / AWS S3 / Cloudflare R2`，核心环境变量如下：
+
+- `SHAREPIER_STORAGE_BACKEND=s3`
+- `SHAREPIER_S3_ENDPOINT`
+- `SHAREPIER_S3_BUCKET`
+- `SHAREPIER_S3_ACCESS_KEY_ID`
+- `SHAREPIER_S3_SECRET_ACCESS_KEY`
+- `SHAREPIER_S3_REGION`
+- `SHAREPIER_S3_USE_SSL`
+- `SHAREPIER_S3_USE_PATH_STYLE`
+- `SHAREPIER_S3_PREFIX`
+
+### 本地用 MinIO 验证
+
+先启动一个本地兼容服务：
+
+```bash
+docker compose --profile s3 up -d minio
+```
+
+然后把 `.env` 改成类似：
+
+```bash
+SHAREPIER_STORAGE_BACKEND=s3
+SHAREPIER_STORAGE_ROOT=/data/storage
+SHAREPIER_S3_ENDPOINT=minio:9000
+SHAREPIER_S3_BUCKET=sharepier
+SHAREPIER_S3_ACCESS_KEY_ID=sharepierminio
+SHAREPIER_S3_SECRET_ACCESS_KEY=sharepierminiosecret
+SHAREPIER_S3_REGION=us-east-1
+SHAREPIER_S3_USE_SSL=false
+SHAREPIER_S3_USE_PATH_STYLE=true
+SHAREPIER_S3_AUTO_CREATE_BUCKET=true
+```
+
+再重启 API：
+
+```bash
+docker compose up -d sharepier-api
+```
+
+说明：
+
+- `SHAREPIER_STORAGE_ROOT` 在 `s3` 模式下仍然保留，用于本地上传会话缓存和临时工作目录
+- 公开下载链接仍保持原来的 `/f/:publicId/:filename?`，不会因为切到对象存储而改路径
+- 健康检查会返回 `storageBackend` 和 `storageLocation`，可用于确认当前实例实际连接到哪种存储
+
 ## 下一步
 
 - 将管理员密码替换成你自己的长期密码
 - 将 `SHAREPIER_SHARE_ACCESS_SECRET` 换成独立随机长串
-- 引入 S3 兼容对象存储
+- 增加审计日志与操作记录页

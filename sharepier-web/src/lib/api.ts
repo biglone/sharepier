@@ -17,6 +17,8 @@ export interface HealthResponse {
   environment?: string
   timestamp?: string
   message?: string
+  storageBackend?: string
+  storageLocation?: string
   storageRoot?: string
 }
 

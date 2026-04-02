@@ -29,9 +29,9 @@ type FilesState = 'idle' | 'loading' | 'success' | 'error'
 type FileStatusFilter = 'all' | 'active' | 'disabled'
 
 const milestones = [
-  'M0-M9 已完成：骨架、登录、普通上传、分片上传/续传、搜索/筛选、批量操作、下载、禁用/删除、正式域名、分享页、静态前端服务',
-  'M10: S3 兼容对象存储切换能力',
+  'M0-M10 已完成：骨架、登录、普通上传、分片上传/续传、搜索/筛选、批量操作、下载、禁用/删除、正式域名、分享页、静态前端服务、S3 兼容对象存储切换能力',
   'M11 已完成：分享策略（过期、密码、单次下载）',
+  'M12: 审计日志与上传/下载操作记录页',
 ]
 
 const resumableUploadStorageKey = 'sharepier.resumable-upload'
@@ -735,6 +735,14 @@ export function DashboardPage() {
             <div>
               <dt>Environment</dt>
               <dd>{health.environment}</dd>
+            </div>
+            <div>
+              <dt>Storage Backend</dt>
+              <dd>{health.storageBackend}</dd>
+            </div>
+            <div>
+              <dt>Storage Location</dt>
+              <dd>{health.storageLocation}</dd>
             </div>
             <div>
               <dt>Storage Root</dt>

@@ -42,7 +42,7 @@ services:
       HTTPS_PROXY: ${DOCKER_HTTPS_PROXY:-${HTTPS_PROXY:-}}
       ALL_PROXY: ${DOCKER_ALL_PROXY:-${ALL_PROXY:-}}
       NO_PROXY: ${DOCKER_NO_PROXY:-${NO_PROXY:-}}
-      GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+      GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
       DATABASE_URL: ${DATABASE_URL:-postgres://sharepier:sharepier@postgres:5432/sharepier?sslmode=disable}
       SHAREPIER_ENV: ${SHAREPIER_ENV:-development}
       SHAREPIER_HOST: ${SHAREPIER_HOST:-0.0.0.0}
@@ -52,9 +52,24 @@ services:
       SHAREPIER_SESSION_TTL: ${SHAREPIER_SESSION_TTL:-168h}
       SHAREPIER_SECURE_COOKIES: ${SHAREPIER_SECURE_COOKIES:-false}
       SHAREPIER_ALLOWED_ORIGINS: ${SHAREPIER_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:3300,http://127.0.0.1:3300,http://localhost:5173,http://127.0.0.1:5173}
+      SHAREPIER_SHARE_ACCESS_COOKIE_NAME: ${SHAREPIER_SHARE_ACCESS_COOKIE_NAME:-sharepier_public_access}
+      SHAREPIER_SHARE_ACCESS_SECRET: ${SHAREPIER_SHARE_ACCESS_SECRET:-change-me-share-access-secret}
+      SHAREPIER_SHARE_ACCESS_TTL: ${SHAREPIER_SHARE_ACCESS_TTL:-12h}
+      SHAREPIER_STORAGE_BACKEND: ${SHAREPIER_STORAGE_BACKEND:-local}
       SHAREPIER_STORAGE_ROOT: ${SHAREPIER_STORAGE_ROOT:-/data/storage}
+      SHAREPIER_S3_ENDPOINT: ${SHAREPIER_S3_ENDPOINT:-}
+      SHAREPIER_S3_REGION: ${SHAREPIER_S3_REGION:-}
+      SHAREPIER_S3_BUCKET: ${SHAREPIER_S3_BUCKET:-}
+      SHAREPIER_S3_ACCESS_KEY_ID: ${SHAREPIER_S3_ACCESS_KEY_ID:-}
+      SHAREPIER_S3_SECRET_ACCESS_KEY: ${SHAREPIER_S3_SECRET_ACCESS_KEY:-}
+      SHAREPIER_S3_USE_SSL: ${SHAREPIER_S3_USE_SSL:-true}
+      SHAREPIER_S3_USE_PATH_STYLE: ${SHAREPIER_S3_USE_PATH_STYLE:-false}
+      SHAREPIER_S3_PREFIX: ${SHAREPIER_S3_PREFIX:-}
+      SHAREPIER_S3_AUTO_CREATE_BUCKET: ${SHAREPIER_S3_AUTO_CREATE_BUCKET:-true}
       SHAREPIER_PUBLIC_BASE_URL: ${SHAREPIER_PUBLIC_BASE_URL:-http://localhost:38080}
       SHAREPIER_MAX_UPLOAD_SIZE: ${SHAREPIER_MAX_UPLOAD_SIZE:-104857600}
+      SHAREPIER_RESUMABLE_CHUNK_SIZE: ${SHAREPIER_RESUMABLE_CHUNK_SIZE:-8388608}
+      SHAREPIER_UPLOAD_SESSION_TTL: ${SHAREPIER_UPLOAD_SESSION_TTL:-24h}
       SHAREPIER_ADMIN_USERNAME: ${SHAREPIER_ADMIN_USERNAME:-admin}
       SHAREPIER_ADMIN_PASSWORD: ${SHAREPIER_ADMIN_PASSWORD:-change-me-now}
     ports:
@@ -88,6 +103,21 @@ services:
       - ./sharepier-web:/app
     depends_on:
       - sharepier-api
+
+  minio:
+    image: minio/minio:latest
+    container_name: sharepier-minio
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-sharepierminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-sharepierminiosecret}
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - ./data/minio:/data
+    profiles:
+      - s3
 
   cloudflared:
     image: cloudflare/cloudflared:latest

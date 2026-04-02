@@ -23,7 +23,17 @@ type Config struct {
 	ShareAccessCookie      string
 	ShareAccessSecret      string
 	ShareAccessTTL         time.Duration
+	StorageBackend         string
 	StorageRoot            string
+	S3Endpoint             string
+	S3Region               string
+	S3Bucket               string
+	S3AccessKeyID          string
+	S3SecretAccessKey      string
+	S3UseSSL               bool
+	S3UsePathStyle         bool
+	S3Prefix               string
+	S3AutoCreateBucket     bool
 	PublicBaseURL          string
 	MaxUploadSize          int64
 	ResumableChunkSize     int64
@@ -51,7 +61,17 @@ func Load() Config {
 		ShareAccessCookie:      getEnv("SHAREPIER_SHARE_ACCESS_COOKIE_NAME", "sharepier_public_access"),
 		ShareAccessSecret:      getEnv("SHAREPIER_SHARE_ACCESS_SECRET", getEnv("SHAREPIER_ADMIN_PASSWORD", "sharepier-dev-share-access")),
 		ShareAccessTTL:         getEnvAsDuration("SHAREPIER_SHARE_ACCESS_TTL", 12*time.Hour),
+		StorageBackend:         getEnv("SHAREPIER_STORAGE_BACKEND", "local"),
 		StorageRoot:            getEnv("SHAREPIER_STORAGE_ROOT", "./data/storage"),
+		S3Endpoint:             getEnv("SHAREPIER_S3_ENDPOINT", ""),
+		S3Region:               getEnv("SHAREPIER_S3_REGION", ""),
+		S3Bucket:               getEnv("SHAREPIER_S3_BUCKET", ""),
+		S3AccessKeyID:          getEnv("SHAREPIER_S3_ACCESS_KEY_ID", ""),
+		S3SecretAccessKey:      getEnv("SHAREPIER_S3_SECRET_ACCESS_KEY", ""),
+		S3UseSSL:               getEnvAsBool("SHAREPIER_S3_USE_SSL", true),
+		S3UsePathStyle:         getEnvAsBool("SHAREPIER_S3_USE_PATH_STYLE", false),
+		S3Prefix:               getEnv("SHAREPIER_S3_PREFIX", ""),
+		S3AutoCreateBucket:     getEnvAsBool("SHAREPIER_S3_AUTO_CREATE_BUCKET", true),
 		PublicBaseURL:          getEnv("SHAREPIER_PUBLIC_BASE_URL", "http://localhost:8080"),
 		MaxUploadSize:          getEnvAsInt64("SHAREPIER_MAX_UPLOAD_SIZE", 100<<20),
 		ResumableChunkSize:     getEnvAsInt64("SHAREPIER_RESUMABLE_CHUNK_SIZE", 8<<20),

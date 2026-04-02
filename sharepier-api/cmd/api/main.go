@@ -24,7 +24,19 @@ func main() {
 	level.Set(config.ParseLogLevel(cfg.LogLevel))
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
-	store, err := storage.NewLocalFSStore(cfg.StorageRoot)
+	store, err := storage.NewStore(ctx, storage.Config{
+		Backend:            cfg.StorageBackend,
+		Root:               cfg.StorageRoot,
+		S3Endpoint:         cfg.S3Endpoint,
+		S3Region:           cfg.S3Region,
+		S3Bucket:           cfg.S3Bucket,
+		S3AccessKeyID:      cfg.S3AccessKeyID,
+		S3SecretAccessKey:  cfg.S3SecretAccessKey,
+		S3UseSSL:           cfg.S3UseSSL,
+		S3UsePathStyle:     cfg.S3UsePathStyle,
+		S3Prefix:           cfg.S3Prefix,
+		S3AutoCreateBucket: cfg.S3AutoCreateBucket,
+	})
 	if err != nil {
 		logger.Error("failed to initialize storage", slog.String("error", err.Error()))
 		os.Exit(1)
@@ -73,6 +85,8 @@ func main() {
 	logger.Info(
 		"sharepier api listening",
 		slog.String("addr", addr),
+		slog.String("storage_backend", store.Backend()),
+		slog.String("storage_location", store.Location()),
 		slog.String("storage_root", store.Root()),
 	)
 

@@ -20,13 +20,15 @@ import (
 )
 
 type statusResponse struct {
-	Status      string `json:"status"`
-	Name        string `json:"name,omitempty"`
-	Version     string `json:"version,omitempty"`
-	Environment string `json:"environment,omitempty"`
-	Timestamp   string `json:"timestamp,omitempty"`
-	Message     string `json:"message,omitempty"`
-	StorageRoot string `json:"storageRoot,omitempty"`
+	Status          string `json:"status"`
+	Name            string `json:"name,omitempty"`
+	Version         string `json:"version,omitempty"`
+	Environment     string `json:"environment,omitempty"`
+	Timestamp       string `json:"timestamp,omitempty"`
+	Message         string `json:"message,omitempty"`
+	StorageBackend  string `json:"storageBackend,omitempty"`
+	StorageLocation string `json:"storageLocation,omitempty"`
+	StorageRoot     string `json:"storageRoot,omitempty"`
 }
 
 type loginRequest struct {
@@ -69,7 +71,7 @@ type uploadSessionResponse struct {
 func NewRouter(
 	cfg config.Config,
 	logger *slog.Logger,
-	store *storage.LocalFSStore,
+	store storage.Store,
 	authService *auth.Service,
 	fileService *files.Service,
 ) http.Handler {
@@ -90,12 +92,14 @@ func NewRouter(
 
 	router.Get("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, statusResponse{
-			Status:      "ok",
-			Name:        cfg.AppName,
-			Version:     "0.1.0-skeleton",
-			Environment: cfg.Env,
-			Timestamp:   time.Now().UTC().Format(time.RFC3339),
-			StorageRoot: store.Root(),
+			Status:          "ok",
+			Name:            cfg.AppName,
+			Version:         "0.1.0-skeleton",
+			Environment:     cfg.Env,
+			Timestamp:       time.Now().UTC().Format(time.RFC3339),
+			StorageBackend:  store.Backend(),
+			StorageLocation: store.Location(),
+			StorageRoot:     store.Root(),
 		})
 	})
 
@@ -841,7 +845,7 @@ func NewRouter(
 			return
 		}
 
-		fileHandle, err := store.Open(info.StorageKey)
+		fileHandle, err := store.Open(r.Context(), info.StorageKey)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, statusResponse{
 				Status:    "error",

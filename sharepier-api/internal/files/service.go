@@ -36,7 +36,7 @@ var ErrShareDownloadLimitReached = errors.New("share download limit reached")
 
 type Service struct {
 	db                 *sql.DB
-	store              *storage.LocalFSStore
+	store              storage.Store
 	publicBaseURL      string
 	resumableChunkSize int64
 	uploadSessionTTL   time.Duration
@@ -130,7 +130,7 @@ type publicAccessState struct {
 
 func NewService(
 	database *sql.DB,
-	store *storage.LocalFSStore,
+	store storage.Store,
 	publicBaseURL string,
 	resumableChunkSize int64,
 	uploadSessionTTL time.Duration,
@@ -235,7 +235,7 @@ func (s *Service) Upload(ctx context.Context, params UploadParams) (FileRecord, 
 	}
 	sha256Hex := hex.EncodeToString(hasher.Sum(nil))
 
-	if err := s.store.PutFile(tempPath, storageKey); err != nil {
+	if err := s.store.PutFile(ctx, tempPath, storageKey, contentType); err != nil {
 		return FileRecord{}, err
 	}
 
@@ -250,7 +250,7 @@ func (s *Service) Upload(ctx context.Context, params UploadParams) (FileRecord, 
 		PublicID:     publicID,
 	})
 	if err != nil {
-		_ = s.store.Delete(storageKey)
+		_ = s.store.Delete(ctx, storageKey)
 		return FileRecord{}, err
 	}
 
@@ -471,7 +471,7 @@ func (s *Service) Delete(ctx context.Context, fileID int64) error {
 	}
 
 	if shouldDeleteObject {
-		_ = s.store.Delete(storageKey)
+		_ = s.store.Delete(ctx, storageKey)
 	}
 
 	return nil
