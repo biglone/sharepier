@@ -9,38 +9,39 @@ import (
 )
 
 type Config struct {
-	AppName                string
-	DatabaseURL            string
-	Env                    string
-	Host                   string
-	Port                   int
-	LogLevel               string
-	MigrationsDir          string
-	AllowedOrigins         []string
-	SessionTTL             time.Duration
-	SessionCookie          string
-	SecureCookies          bool
-	ShareAccessCookie      string
-	ShareAccessSecret      string
-	ShareAccessTTL         time.Duration
-	StorageBackend         string
-	StorageRoot            string
-	S3Endpoint             string
-	S3Region               string
-	S3Bucket               string
-	S3AccessKeyID          string
-	S3SecretAccessKey      string
-	S3UseSSL               bool
-	S3UsePathStyle         bool
-	S3Prefix               string
-	S3AutoCreateBucket     bool
-	StorageQuotaBytes      int64
-	PublicBaseURL          string
-	MaxUploadSize          int64
-	ResumableChunkSize     int64
-	UploadSessionTTL       time.Duration
-	AdminBootstrapUsername string
-	AdminBootstrapPassword string
+	AppName                      string
+	DatabaseURL                  string
+	Env                          string
+	Host                         string
+	Port                         int
+	LogLevel                     string
+	MigrationsDir                string
+	AllowedOrigins               []string
+	SessionTTL                   time.Duration
+	SessionCookie                string
+	SecureCookies                bool
+	ShareAccessCookie            string
+	ShareAccessSecret            string
+	ShareAccessTTL               time.Duration
+	StorageBackend               string
+	StorageRoot                  string
+	S3Endpoint                   string
+	S3Region                     string
+	S3Bucket                     string
+	S3AccessKeyID                string
+	S3SecretAccessKey            string
+	S3UseSSL                     bool
+	S3UsePathStyle               bool
+	S3Prefix                     string
+	S3AutoCreateBucket           bool
+	StorageQuotaBytes            int64
+	PublicBaseURL                string
+	MaxUploadSize                int64
+	ResumableChunkSize           int64
+	UploadSessionTTL             time.Duration
+	UploadSessionCleanupInterval time.Duration
+	AdminBootstrapUsername       string
+	AdminBootstrapPassword       string
 }
 
 func Load() Config {
@@ -48,38 +49,39 @@ func Load() Config {
 	secureCookiesDefault := env != "development"
 
 	return Config{
-		AppName:                getEnv("SHAREPIER_APP_NAME", "SharePier API"),
-		DatabaseURL:            getEnv("DATABASE_URL", "postgres://sharepier:sharepier@localhost:5432/sharepier?sslmode=disable"),
-		Env:                    env,
-		Host:                   getEnv("SHAREPIER_HOST", "0.0.0.0"),
-		Port:                   getEnvAsInt("SHAREPIER_PORT", 8080),
-		LogLevel:               getEnv("SHAREPIER_LOG_LEVEL", "info"),
-		MigrationsDir:          getEnv("SHAREPIER_MIGRATIONS_DIR", "./migrations"),
-		AllowedOrigins:         splitCSV(getEnv("SHAREPIER_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173")),
-		SessionTTL:             getEnvAsDuration("SHAREPIER_SESSION_TTL", 168*time.Hour),
-		SessionCookie:          getEnv("SHAREPIER_SESSION_COOKIE_NAME", "sharepier_session"),
-		SecureCookies:          getEnvAsBool("SHAREPIER_SECURE_COOKIES", secureCookiesDefault),
-		ShareAccessCookie:      getEnv("SHAREPIER_SHARE_ACCESS_COOKIE_NAME", "sharepier_public_access"),
-		ShareAccessSecret:      getEnv("SHAREPIER_SHARE_ACCESS_SECRET", getEnv("SHAREPIER_ADMIN_PASSWORD", "sharepier-dev-share-access")),
-		ShareAccessTTL:         getEnvAsDuration("SHAREPIER_SHARE_ACCESS_TTL", 12*time.Hour),
-		StorageBackend:         getEnv("SHAREPIER_STORAGE_BACKEND", "local"),
-		StorageRoot:            getEnv("SHAREPIER_STORAGE_ROOT", "./data/storage"),
-		S3Endpoint:             getEnv("SHAREPIER_S3_ENDPOINT", ""),
-		S3Region:               getEnv("SHAREPIER_S3_REGION", ""),
-		S3Bucket:               getEnv("SHAREPIER_S3_BUCKET", ""),
-		S3AccessKeyID:          getEnv("SHAREPIER_S3_ACCESS_KEY_ID", ""),
-		S3SecretAccessKey:      getEnv("SHAREPIER_S3_SECRET_ACCESS_KEY", ""),
-		S3UseSSL:               getEnvAsBool("SHAREPIER_S3_USE_SSL", true),
-		S3UsePathStyle:         getEnvAsBool("SHAREPIER_S3_USE_PATH_STYLE", false),
-		S3Prefix:               getEnv("SHAREPIER_S3_PREFIX", ""),
-		S3AutoCreateBucket:     getEnvAsBool("SHAREPIER_S3_AUTO_CREATE_BUCKET", true),
-		StorageQuotaBytes:      getEnvAsInt64("SHAREPIER_STORAGE_QUOTA_BYTES", 0),
-		PublicBaseURL:          getEnv("SHAREPIER_PUBLIC_BASE_URL", "http://localhost:8080"),
-		MaxUploadSize:          getEnvAsInt64("SHAREPIER_MAX_UPLOAD_SIZE", 100<<20),
-		ResumableChunkSize:     getEnvAsInt64("SHAREPIER_RESUMABLE_CHUNK_SIZE", 8<<20),
-		UploadSessionTTL:       getEnvAsDuration("SHAREPIER_UPLOAD_SESSION_TTL", 24*time.Hour),
-		AdminBootstrapUsername: getEnv("SHAREPIER_ADMIN_USERNAME", ""),
-		AdminBootstrapPassword: getEnv("SHAREPIER_ADMIN_PASSWORD", ""),
+		AppName:                      getEnv("SHAREPIER_APP_NAME", "SharePier API"),
+		DatabaseURL:                  getEnv("DATABASE_URL", "postgres://sharepier:sharepier@localhost:5432/sharepier?sslmode=disable"),
+		Env:                          env,
+		Host:                         getEnv("SHAREPIER_HOST", "0.0.0.0"),
+		Port:                         getEnvAsInt("SHAREPIER_PORT", 8080),
+		LogLevel:                     getEnv("SHAREPIER_LOG_LEVEL", "info"),
+		MigrationsDir:                getEnv("SHAREPIER_MIGRATIONS_DIR", "./migrations"),
+		AllowedOrigins:               splitCSV(getEnv("SHAREPIER_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173")),
+		SessionTTL:                   getEnvAsDuration("SHAREPIER_SESSION_TTL", 168*time.Hour),
+		SessionCookie:                getEnv("SHAREPIER_SESSION_COOKIE_NAME", "sharepier_session"),
+		SecureCookies:                getEnvAsBool("SHAREPIER_SECURE_COOKIES", secureCookiesDefault),
+		ShareAccessCookie:            getEnv("SHAREPIER_SHARE_ACCESS_COOKIE_NAME", "sharepier_public_access"),
+		ShareAccessSecret:            getEnv("SHAREPIER_SHARE_ACCESS_SECRET", getEnv("SHAREPIER_ADMIN_PASSWORD", "sharepier-dev-share-access")),
+		ShareAccessTTL:               getEnvAsDuration("SHAREPIER_SHARE_ACCESS_TTL", 12*time.Hour),
+		StorageBackend:               getEnv("SHAREPIER_STORAGE_BACKEND", "local"),
+		StorageRoot:                  getEnv("SHAREPIER_STORAGE_ROOT", "./data/storage"),
+		S3Endpoint:                   getEnv("SHAREPIER_S3_ENDPOINT", ""),
+		S3Region:                     getEnv("SHAREPIER_S3_REGION", ""),
+		S3Bucket:                     getEnv("SHAREPIER_S3_BUCKET", ""),
+		S3AccessKeyID:                getEnv("SHAREPIER_S3_ACCESS_KEY_ID", ""),
+		S3SecretAccessKey:            getEnv("SHAREPIER_S3_SECRET_ACCESS_KEY", ""),
+		S3UseSSL:                     getEnvAsBool("SHAREPIER_S3_USE_SSL", true),
+		S3UsePathStyle:               getEnvAsBool("SHAREPIER_S3_USE_PATH_STYLE", false),
+		S3Prefix:                     getEnv("SHAREPIER_S3_PREFIX", ""),
+		S3AutoCreateBucket:           getEnvAsBool("SHAREPIER_S3_AUTO_CREATE_BUCKET", true),
+		StorageQuotaBytes:            getEnvAsInt64("SHAREPIER_STORAGE_QUOTA_BYTES", 0),
+		PublicBaseURL:                getEnv("SHAREPIER_PUBLIC_BASE_URL", "http://localhost:8080"),
+		MaxUploadSize:                getEnvAsInt64("SHAREPIER_MAX_UPLOAD_SIZE", 100<<20),
+		ResumableChunkSize:           getEnvAsInt64("SHAREPIER_RESUMABLE_CHUNK_SIZE", 8<<20),
+		UploadSessionTTL:             getEnvAsDuration("SHAREPIER_UPLOAD_SESSION_TTL", 24*time.Hour),
+		UploadSessionCleanupInterval: getEnvAsDuration("SHAREPIER_UPLOAD_SESSION_CLEANUP_INTERVAL", 5*time.Minute),
+		AdminBootstrapUsername:       getEnv("SHAREPIER_ADMIN_USERNAME", ""),
+		AdminBootstrapPassword:       getEnv("SHAREPIER_ADMIN_PASSWORD", ""),
 	}
 }
 

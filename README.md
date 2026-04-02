@@ -48,10 +48,11 @@ Compose 已为容器注入 `host.docker.internal -> host-gateway`，便于这种
 - `sharepier-api` 容器默认使用 `DOCKER_GOPROXY=https://goproxy.cn,direct`，避免容器内拉取较大 Go 依赖时频繁遇到 `unexpected EOF`
 - `sharepier-web` 默认使用 `npm ci`，并通过 `NPM_CONFIG_REGISTRY` 指向 `https://registry.npmmirror.com`，减少容器内首次安装依赖耗时
 - `sharepier-web` 使用 `node:22-alpine`，容器启动后会先构建静态资源，再用 Node 静态文件服务对外提供页面
-- 默认普通上传入口受 `SHAREPIER_MAX_UPLOAD_SIZE` 控制；大文件分片上传走独立会话，单片大小由 `SHAREPIER_RESUMABLE_CHUNK_SIZE` 控制，会话过期时间由 `SHAREPIER_UPLOAD_SESSION_TTL` 控制
+- 默认普通上传入口受 `SHAREPIER_MAX_UPLOAD_SIZE` 控制；大文件分片上传走独立会话，单片大小由 `SHAREPIER_RESUMABLE_CHUNK_SIZE` 控制，会话过期时间由 `SHAREPIER_UPLOAD_SESSION_TTL` 控制，后台会按 `SHAREPIER_UPLOAD_SESSION_CLEANUP_INTERVAL` 自动清理过期分片会话与残留临时文件
 - 分享策略支持三类限制：失效时间、访问密码、最大下载次数；密码保护通过短期 HttpOnly Cookie 解锁，密钥由 `SHAREPIER_SHARE_ACCESS_SECRET` 提供
 - 存储后端默认是 `local`；将 `SHAREPIER_STORAGE_BACKEND=s3` 后，可切换到任意兼容 `S3 API` 的对象存储（如 `MinIO`、`AWS S3`、`Cloudflare R2`）
 - `SHAREPIER_STORAGE_QUOTA_BYTES` 可选；设置后管理台会展示配额、已用空间、剩余空间和用量百分比，并在普通上传、分片会话创建、分片完成时执行服务端配额拦截；默认 `0` 表示不设置上限
+- `SHAREPIER_UPLOAD_SESSION_CLEANUP_INTERVAL` 默认 `5m`；设置为更短值可更快回收过期分片会话，设置为 `0s` 可关闭周期清理（启动时清理仍会执行一次）
 
 启动后默认地址：
 
@@ -193,5 +194,4 @@ docker compose up -d sharepier-api
 
 - 将管理员密码替换成你自己的长期密码
 - 将 `SHAREPIER_SHARE_ACCESS_SECRET` 换成独立随机长串
-- 增加过期分片会话清理，释放已过期的临时上传占用
 - 增加审计日志分页与更多筛选维度

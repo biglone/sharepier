@@ -76,6 +76,48 @@ func main() {
 		cfg.ShareAccessSecret,
 		cfg.ShareAccessTTL,
 	)
+	runUploadSessionCleanup := func(ctx context.Context, reason string) {
+		result, err := fileService.CleanupExpiredUploadSessions(ctx)
+		if err != nil {
+			logger.Warn(
+				"failed to cleanup expired upload sessions",
+				slog.String("reason", reason),
+				slog.String("error", err.Error()),
+			)
+			return
+		}
+		if result.ExpiredSessions == 0 && result.RemovedSessionFile == 0 && result.RemovedOrphanFile == 0 {
+			return
+		}
+
+		logger.Info(
+			"cleaned expired upload sessions",
+			slog.String("reason", reason),
+			slog.Int("expired_sessions", result.ExpiredSessions),
+			slog.Int("removed_session_files", result.RemovedSessionFile),
+			slog.Int("removed_orphan_files", result.RemovedOrphanFile),
+		)
+	}
+	runUploadSessionCleanup(ctx, "startup")
+	if cfg.UploadSessionCleanupInterval > 0 {
+		cleanupCtx, cancelCleanup := context.WithCancel(context.Background())
+		defer cancelCleanup()
+
+		go func() {
+			ticker := time.NewTicker(cfg.UploadSessionCleanupInterval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-cleanupCtx.Done():
+					return
+				case <-ticker.C:
+					runUploadSessionCleanup(cleanupCtx, "background")
+				}
+			}
+		}()
+	}
+
 	router := httpx.NewRouter(cfg, logger, store, authService, fileService, auditService)
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 
