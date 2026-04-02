@@ -23,11 +23,14 @@ import (
 var ErrInvalidUpload = errors.New("invalid upload")
 var ErrNotFound = errors.New("file not found")
 var ErrInvalidStatus = errors.New("invalid file status")
+var ErrInvalidSelection = errors.New("invalid file selection")
 
 type Service struct {
-	db            *sql.DB
-	store         *storage.LocalFSStore
-	publicBaseURL string
+	db                 *sql.DB
+	store              *storage.LocalFSStore
+	publicBaseURL      string
+	resumableChunkSize int64
+	uploadSessionTTL   time.Duration
 }
 
 type UploadParams struct {
@@ -75,11 +78,26 @@ type PublicDownload struct {
 	UpdatedAt   time.Time
 }
 
-func NewService(database *sql.DB, store *storage.LocalFSStore, publicBaseURL string) *Service {
+func NewService(
+	database *sql.DB,
+	store *storage.LocalFSStore,
+	publicBaseURL string,
+	resumableChunkSize int64,
+	uploadSessionTTL time.Duration,
+) *Service {
+	if resumableChunkSize <= 0 {
+		resumableChunkSize = 8 << 20
+	}
+	if uploadSessionTTL <= 0 {
+		uploadSessionTTL = 24 * time.Hour
+	}
+
 	return &Service{
-		db:            database,
-		store:         store,
-		publicBaseURL: strings.TrimRight(publicBaseURL, "/"),
+		db:                 database,
+		store:              store,
+		publicBaseURL:      strings.TrimRight(publicBaseURL, "/"),
+		resumableChunkSize: resumableChunkSize,
+		uploadSessionTTL:   uploadSessionTTL,
 	}
 }
 
@@ -284,6 +302,50 @@ func (s *Service) SetStatus(ctx context.Context, fileID int64, status string) (F
 	return item, nil
 }
 
+func (s *Service) SetStatusMany(ctx context.Context, fileIDs []int64, status string) (int64, error) {
+	status = strings.TrimSpace(strings.ToLower(status))
+	switch status {
+	case "active", "disabled":
+	default:
+		return 0, ErrInvalidStatus
+	}
+
+	normalized := normalizeFileIDs(fileIDs)
+	if len(normalized) == 0 {
+		return 0, ErrInvalidSelection
+	}
+
+	args := make([]any, 0, len(normalized)+1)
+	args = append(args, status)
+	placeholders := make([]string, 0, len(normalized))
+	for _, fileID := range normalized {
+		args = append(args, fileID)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+	}
+
+	query := fmt.Sprintf(
+		`update files
+		set status = $1, updated_at = now()
+		where id in (%s)`,
+		strings.Join(placeholders, ", "),
+	)
+
+	result, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+
+	affectedCount, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if affectedCount == 0 {
+		return 0, ErrNotFound
+	}
+
+	return affectedCount, nil
+}
+
 func (s *Service) Delete(ctx context.Context, fileID int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -332,6 +394,31 @@ func (s *Service) Delete(ctx context.Context, fileID int64) error {
 	}
 
 	return nil
+}
+
+func (s *Service) DeleteMany(ctx context.Context, fileIDs []int64) (int64, error) {
+	normalized := normalizeFileIDs(fileIDs)
+	if len(normalized) == 0 {
+		return 0, ErrInvalidSelection
+	}
+
+	var affectedCount int64
+	for _, fileID := range normalized {
+		if err := s.Delete(ctx, fileID); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return affectedCount, err
+		}
+
+		affectedCount += 1
+	}
+
+	if affectedCount == 0 {
+		return 0, ErrNotFound
+	}
+
+	return affectedCount, nil
 }
 
 func (s *Service) GetPublicDownload(ctx context.Context, publicID string) (PublicDownload, error) {
@@ -572,4 +659,26 @@ func hashString(value string) string {
 
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+func normalizeFileIDs(fileIDs []int64) []int64 {
+	if len(fileIDs) == 0 {
+		return nil
+	}
+
+	seen := make(map[int64]struct{}, len(fileIDs))
+	items := make([]int64, 0, len(fileIDs))
+	for _, fileID := range fileIDs {
+		if fileID <= 0 {
+			continue
+		}
+		if _, exists := seen[fileID]; exists {
+			continue
+		}
+
+		seen[fileID] = struct{}{}
+		items = append(items, fileID)
+	}
+
+	return items
 }

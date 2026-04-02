@@ -23,6 +23,8 @@ type Config struct {
 	StorageRoot            string
 	PublicBaseURL          string
 	MaxUploadSize          int64
+	ResumableChunkSize     int64
+	UploadSessionTTL       time.Duration
 	AdminBootstrapUsername string
 	AdminBootstrapPassword string
 }
@@ -46,6 +48,8 @@ func Load() Config {
 		StorageRoot:            getEnv("SHAREPIER_STORAGE_ROOT", "./data/storage"),
 		PublicBaseURL:          getEnv("SHAREPIER_PUBLIC_BASE_URL", "http://localhost:8080"),
 		MaxUploadSize:          getEnvAsInt64("SHAREPIER_MAX_UPLOAD_SIZE", 100<<20),
+		ResumableChunkSize:     getEnvAsInt64("SHAREPIER_RESUMABLE_CHUNK_SIZE", 8<<20),
+		UploadSessionTTL:       getEnvAsDuration("SHAREPIER_UPLOAD_SESSION_TTL", 24*time.Hour),
 		AdminBootstrapUsername: getEnv("SHAREPIER_ADMIN_USERNAME", ""),
 		AdminBootstrapPassword: getEnv("SHAREPIER_ADMIN_PASSWORD", ""),
 	}

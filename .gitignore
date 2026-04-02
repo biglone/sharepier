@@ -5,7 +5,7 @@ sharepier-web/*.tsbuildinfo
 sharepier-api/bin/
 sharepier-api/.cache/
 sharepier-api/api
-data/postgres/*
+data/postgres/
 data/storage/*
 cloudflared/*.json
 cloudflared/config.yml

@@ -1,32 +1,39 @@
 import { Link } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   ApiError,
+  batchUpdateFiles,
+  completeResumableUpload,
+  createResumableUploadSession,
   deleteFile,
   getCurrentUser,
   getHealth,
+  getResumableUploadSession,
   listFiles,
   logout,
   setFileStatus,
+  uploadResumableChunk,
   uploadFile,
   type AuthUser,
   type FileRecord,
   type HealthResponse,
+  type UploadSessionRecord,
 } from '../lib/api'
 import { env } from '../lib/env'
 
 type LoadState = 'idle' | 'loading' | 'success' | 'error'
 type AuthState = 'idle' | 'loading' | 'authenticated' | 'unauthenticated' | 'error'
 type FilesState = 'idle' | 'loading' | 'success' | 'error'
+type FileStatusFilter = 'all' | 'active' | 'disabled'
 
 const milestones = [
-  'M0-M7 已完成：骨架、登录、上传、下载、禁用/删除、正式域名、分享页、静态前端服务',
-  'M8: 文件搜索、筛选、批量操作',
-  'M9: 大文件分片上传 / 断点续传',
+  'M0-M9 已完成：骨架、登录、普通上传、分片上传/续传、搜索/筛选、批量操作、下载、禁用/删除、正式域名、分享页、静态前端服务',
   'M10: S3 兼容对象存储切换能力',
   'M11: 细化权限与分享策略（过期、密码、单次下载）',
 ]
+
+const resumableUploadStorageKey = 'sharepier.resumable-upload'
 
 export function DashboardPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null)
@@ -38,12 +45,50 @@ export function DashboardPage() {
   const [files, setFiles] = useState<FileRecord[]>([])
   const [filesState, setFilesState] = useState<FilesState>('idle')
   const [filesError, setFilesError] = useState<string | null>(null)
+  const [searchTerm, setSearchTerm] = useState('')
+  const [statusFilter, setStatusFilter] = useState<FileStatusFilter>('all')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [displayName, setDisplayName] = useState('')
   const [uploading, setUploading] = useState(false)
   const [uploadMessage, setUploadMessage] = useState<string | null>(null)
+  const [resumableFile, setResumableFile] = useState<File | null>(null)
+  const [resumableDisplayName, setResumableDisplayName] = useState('')
+  const [resumableUploading, setResumableUploading] = useState(false)
+  const [resumableMessage, setResumableMessage] = useState<string | null>(null)
+  const [resumableProgress, setResumableProgress] = useState(0)
+  const [resumableSessionToken, setResumableSessionToken] = useState<string | null>(null)
+  const [resumableSession, setResumableSession] = useState<UploadSessionRecord | null>(null)
+  const [selectedFileIds, setSelectedFileIds] = useState<number[]>([])
   const [fileActionBusyId, setFileActionBusyId] = useState<number | null>(null)
+  const [batchActionBusy, setBatchActionBusy] = useState(false)
   const [fileActionMessage, setFileActionMessage] = useState<string | null>(null)
+
+  const filteredFiles = useMemo(() => {
+    const normalizedQuery = searchTerm.trim().toLowerCase()
+
+    return files.filter((item) => {
+      if (statusFilter !== 'all' && item.status !== statusFilter) {
+        return false
+      }
+
+      if (normalizedQuery === '') {
+        return true
+      }
+
+      return [
+        item.displayName,
+        item.originalName,
+        item.publicId,
+        item.contentType,
+      ].some((value) => value.toLowerCase().includes(normalizedQuery))
+    })
+  }, [files, searchTerm, statusFilter])
+
+  const allVisibleSelected =
+    filteredFiles.length > 0 &&
+    filteredFiles.every((item) => selectedFileIds.includes(item.id))
+
+  const actionsBusy = batchActionBusy || fileActionBusyId !== null
 
   useEffect(() => {
     let cancelled = false
@@ -102,6 +147,7 @@ export function DashboardPage() {
   useEffect(() => {
     if (authState !== 'authenticated') {
       setFiles([])
+      setSelectedFileIds([])
       setFilesState('idle')
       return
     }
@@ -113,13 +159,12 @@ export function DashboardPage() {
       try {
         const result = await listFiles()
         if (!cancelled) {
-          setFiles(result.items ?? [])
-          setFilesError(null)
-          setFilesState('success')
+          applyFiles(result.items ?? [])
         }
       } catch (err) {
         if (!cancelled) {
           setFiles([])
+          setSelectedFileIds([])
           setFilesError(err instanceof Error ? err.message : 'Unknown error')
           setFilesState('error')
         }
@@ -133,6 +178,18 @@ export function DashboardPage() {
     }
   }, [authState])
 
+  function applyFiles(nextFiles: FileRecord[]) {
+    setFiles(nextFiles)
+    setSelectedFileIds((current) => current.filter((id) => nextFiles.some((item) => item.id === id)))
+    setFilesError(null)
+    setFilesState('success')
+  }
+
+  async function refreshFiles() {
+    const next = await listFiles()
+    applyFiles(next.items ?? [])
+  }
+
   async function handleLogout() {
     try {
       await logout()
@@ -140,6 +197,7 @@ export function DashboardPage() {
       setAuthError('当前未登录')
       setAuthState('unauthenticated')
       setFiles([])
+      setSelectedFileIds([])
       setFilesState('idle')
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : 'Unknown error')
@@ -163,10 +221,7 @@ export function DashboardPage() {
       setDisplayName('')
       setUploadMessage(uploaded ? `上传完成：${uploaded.displayName}` : '上传完成')
 
-      const next = await listFiles()
-      setFiles(next.items ?? [])
-      setFilesState('success')
-      setFilesError(null)
+      await refreshFiles()
     } catch (err) {
       setUploadMessage(err instanceof Error ? err.message : '上传失败')
     } finally {
@@ -174,11 +229,128 @@ export function DashboardPage() {
     }
   }
 
-  async function refreshFiles() {
-    const next = await listFiles()
-    setFiles(next.items ?? [])
-    setFilesState('success')
-    setFilesError(null)
+  function handleResumableFileSelect(file: File | null) {
+    setResumableFile(file)
+    setResumableMessage(null)
+    if (!file) {
+      setResumableSessionToken(null)
+      setResumableSession(null)
+      setResumableProgress(0)
+      return
+    }
+
+    if (resumableDisplayName.trim() === '') {
+      setResumableDisplayName(file.name)
+    }
+
+    const stored = loadStoredResumableUpload()
+    if (stored && stored.fingerprint === getFileFingerprint(file)) {
+      setResumableSessionToken(stored.uploadToken)
+      setResumableMessage('检测到未完成的大文件上传，会优先尝试断点续传。')
+      return
+    }
+
+    setResumableSessionToken(null)
+    setResumableSession(null)
+    setResumableProgress(0)
+  }
+
+  async function resolveResumableSession(file: File): Promise<UploadSessionRecord> {
+    const fingerprint = getFileFingerprint(file)
+    const stored = loadStoredResumableUpload()
+    const candidateToken =
+      stored && stored.fingerprint === fingerprint ? stored.uploadToken : resumableSessionToken
+
+    if (candidateToken) {
+      try {
+        const existing = await getResumableUploadSession(candidateToken)
+        if (existing.session) {
+          setResumableSessionToken(existing.session.uploadToken)
+          setResumableSession(existing.session)
+          setResumableProgress(buildUploadProgress(existing.session.receivedSize, existing.session.totalSize))
+          persistResumableUpload({
+            uploadToken: existing.session.uploadToken,
+            fingerprint,
+            displayName: resumableDisplayName.trim() || file.name,
+          })
+          return existing.session
+        }
+      } catch (err) {
+        if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
+          clearStoredResumableUpload()
+          setResumableSessionToken(null)
+          setResumableSession(null)
+        } else {
+          throw err
+        }
+      }
+    }
+
+    const created = await createResumableUploadSession({
+      originalName: file.name,
+      displayName: resumableDisplayName.trim() || file.name,
+      contentType: file.type || 'application/octet-stream',
+      totalSize: file.size,
+    })
+    if (!created.session) {
+      throw new Error('上传会话创建成功，但服务端没有返回会话信息')
+    }
+
+    setResumableSessionToken(created.session.uploadToken)
+    setResumableSession(created.session)
+    setResumableProgress(0)
+    persistResumableUpload({
+      uploadToken: created.session.uploadToken,
+      fingerprint,
+      displayName: resumableDisplayName.trim() || file.name,
+    })
+
+    return created.session
+  }
+
+  async function handleResumableUpload(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!resumableFile) {
+      setResumableMessage('请选择要分片上传的文件')
+      return
+    }
+
+    setResumableUploading(true)
+    setResumableMessage(null)
+
+    try {
+      const file = resumableFile
+      let session = await resolveResumableSession(file)
+      let offset = session.receivedSize
+      setResumableProgress(buildUploadProgress(offset, file.size))
+
+      while (offset < file.size) {
+        const nextChunk = file.slice(offset, offset + session.chunkSize)
+        const result = await uploadResumableChunk(session.uploadToken, offset, nextChunk)
+        if (!result.session) {
+          throw new Error('分片已上传，但服务端没有返回最新会话状态')
+        }
+
+        session = result.session
+        offset = session.receivedSize
+        setResumableSession(session)
+        setResumableProgress(buildUploadProgress(offset, file.size))
+      }
+
+      const completed = await completeResumableUpload(session.uploadToken)
+      await refreshFiles()
+      clearStoredResumableUpload()
+      setResumableSessionToken(null)
+      setResumableSession(null)
+      setResumableProgress(0)
+      setResumableFile(null)
+      setResumableDisplayName('')
+      setResumableMessage(completed.item ? `分片上传完成：${completed.item.displayName}` : '分片上传完成')
+    } catch (err) {
+      setResumableMessage(err instanceof Error ? `${err.message}。会话已保留，可继续续传。` : '分片上传失败，会话已保留。')
+    } finally {
+      setResumableUploading(false)
+    }
   }
 
   async function handleToggleFileStatus(item: FileRecord) {
@@ -207,6 +379,7 @@ export function DashboardPage() {
     try {
       await deleteFile(item.id)
       await refreshFiles()
+      setSelectedFileIds((current) => current.filter((id) => id !== item.id))
       setFileActionMessage(`已删除：${item.displayName}`)
     } catch (err) {
       setFileActionMessage(err instanceof Error ? err.message : '删除文件失败')
@@ -215,14 +388,84 @@ export function DashboardPage() {
     }
   }
 
+  async function handleBatchSetStatus(status: 'active' | 'disabled') {
+    if (selectedFileIds.length === 0) {
+      return
+    }
+
+    setBatchActionBusy(true)
+    setFileActionMessage(null)
+    try {
+      const result = await batchUpdateFiles('set_status', selectedFileIds, status)
+      const affectedCount = result.affectedCount ?? selectedFileIds.length
+      await refreshFiles()
+      setSelectedFileIds([])
+      setFileActionMessage(status === 'disabled' ? `已批量禁用 ${affectedCount} 个文件` : `已批量启用 ${affectedCount} 个文件`)
+    } catch (err) {
+      setFileActionMessage(err instanceof Error ? err.message : '批量更新文件状态失败')
+    } finally {
+      setBatchActionBusy(false)
+    }
+  }
+
+  async function handleBatchDelete() {
+    if (selectedFileIds.length === 0) {
+      return
+    }
+
+    const shouldDelete = window.confirm(`确认批量删除 ${selectedFileIds.length} 个文件吗？此操作不可恢复。`)
+    if (!shouldDelete) {
+      return
+    }
+
+    setBatchActionBusy(true)
+    setFileActionMessage(null)
+    try {
+      const result = await batchUpdateFiles('delete', selectedFileIds)
+      const affectedCount = result.affectedCount ?? selectedFileIds.length
+      await refreshFiles()
+      setSelectedFileIds([])
+      setFileActionMessage(`已批量删除 ${affectedCount} 个文件`)
+    } catch (err) {
+      setFileActionMessage(err instanceof Error ? err.message : '批量删除文件失败')
+    } finally {
+      setBatchActionBusy(false)
+    }
+  }
+
+  function handleToggleFileSelection(fileID: number) {
+    setSelectedFileIds((current) =>
+      current.includes(fileID) ? current.filter((id) => id !== fileID) : [...current, fileID],
+    )
+  }
+
+  function handleToggleVisibleSelection() {
+    const visibleIDs = filteredFiles.map((item) => item.id)
+    setSelectedFileIds((current) => {
+      const next = new Set(current)
+      if (allVisibleSelected) {
+        visibleIDs.forEach((fileID) => next.delete(fileID))
+      } else {
+        visibleIDs.forEach((fileID) => next.add(fileID))
+      }
+
+      return Array.from(next)
+    })
+  }
+
+  function resetFilters() {
+    setSearchTerm('')
+    setStatusFilter('all')
+  }
+
   return (
     <div className="page-grid">
       <section className="card hero-card">
         <div className="hero-copy">
           <p className="eyebrow">Admin Console</p>
-          <h2>管理员上传后，已经可以拿到正式 HTTPS 分享页与下载直链</h2>
+          <h2>管理员上传后，已经可以直接搜索、筛选并批量管理正式 HTTPS 分享文件</h2>
           <p>
-            当前管理台已经接通登录、上传、禁用、删除、公开分享页和正式公网域名，并连上
+            当前管理台已经接通登录、上传、搜索筛选、批量操作、公开分享页和正式公网域名，并连上
             <code>{env.apiBaseUrl}</code> 的健康检查。
           </p>
         </div>
@@ -323,6 +566,82 @@ export function DashboardPage() {
       <section className="card">
         <div className="section-title-row">
           <div>
+            <p className="eyebrow">Resumable Upload</p>
+            <h3>大文件分片上传 / 断点续传</h3>
+          </div>
+          <span className={`status-pill status-${resumableUploading ? 'loading' : resumableSessionToken ? 'success' : 'idle'}`}>
+            {resumableUploading ? 'uploading' : resumableSessionToken ? 'resumable' : 'ready'}
+          </span>
+        </div>
+        {authState === 'authenticated' ? (
+          <form className="upload-form" onSubmit={handleResumableUpload}>
+            <label>
+              选择大文件
+              <input
+                type="file"
+                onChange={(event) => handleResumableFileSelect(event.target.files?.[0] ?? null)}
+              />
+            </label>
+            <label>
+              展示名称
+              <input
+                type="text"
+                placeholder="保持为空时默认使用原文件名"
+                value={resumableDisplayName}
+                onChange={(event) => setResumableDisplayName(event.target.value)}
+              />
+            </label>
+
+            <p className="subtle-text">
+              适合 Cloudflare Tunnel 场景下的大文件上传。服务端会按推荐分片大小顺序接收，并在失败后从已接收偏移继续。
+            </p>
+
+            {resumableSession ? (
+              <dl className="kv-grid compact-kv-grid">
+                <div>
+                  <dt>Upload Token</dt>
+                  <dd>{resumableSession.uploadToken}</dd>
+                </div>
+                <div>
+                  <dt>Chunk Size</dt>
+                  <dd>{formatBytes(resumableSession.chunkSize)}</dd>
+                </div>
+                <div>
+                  <dt>Received</dt>
+                  <dd>{formatBytes(resumableSession.receivedSize)} / {formatBytes(resumableSession.totalSize)}</dd>
+                </div>
+                <div>
+                  <dt>Status</dt>
+                  <dd>{resumableSession.status}</dd>
+                </div>
+              </dl>
+            ) : null}
+
+            {resumableFile ? (
+              <div className="progress-panel">
+                <div className="progress-copy">
+                  <strong>上传进度</strong>
+                  <span>{resumableProgress}%</span>
+                </div>
+                <div className="progress-track" aria-hidden="true">
+                  <div className="progress-value" style={{ width: `${resumableProgress}%` }} />
+                </div>
+              </div>
+            ) : null}
+
+            <button type="submit" disabled={resumableUploading}>
+              {resumableUploading ? '上传中…' : resumableSessionToken ? '继续分片上传' : '开始分片上传'}
+            </button>
+          </form>
+        ) : (
+          <p>请先登录管理员账号后再使用分片上传。</p>
+        )}
+        {resumableMessage ? <p className="notice-text">{resumableMessage}</p> : null}
+      </section>
+
+      <section className="card">
+        <div className="section-title-row">
+          <div>
             <p className="eyebrow">Service Status</p>
             <h3>API 健康检查</h3>
           </div>
@@ -362,18 +681,111 @@ export function DashboardPage() {
             {filesState}
           </span>
         </div>
+
+        {authState === 'authenticated' ? (
+          <>
+            <div className="files-toolbar">
+              <label className="filter-field">
+                搜索文件
+                <input
+                  type="search"
+                  placeholder="按文件名、Public ID 或类型筛选"
+                  value={searchTerm}
+                  onChange={(event) => setSearchTerm(event.target.value)}
+                />
+              </label>
+
+              <label className="filter-field">
+                状态筛选
+                <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as FileStatusFilter)}>
+                  <option value="all">全部状态</option>
+                  <option value="active">仅启用</option>
+                  <option value="disabled">仅禁用</option>
+                </select>
+              </label>
+
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={searchTerm === '' && statusFilter === 'all'}
+                onClick={resetFilters}
+              >
+                清空筛选
+              </button>
+            </div>
+
+            <div className="bulk-toolbar">
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  disabled={filteredFiles.length === 0 || actionsBusy}
+                  onChange={handleToggleVisibleSelection}
+                />
+                <span>全选当前结果</span>
+              </label>
+
+              <p className="subtle-text">
+                当前显示 {filteredFiles.length} / 共 {files.length} 项，已选 {selectedFileIds.length} 项。
+              </p>
+
+              <div className="file-actions">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={selectedFileIds.length === 0 || actionsBusy}
+                  onClick={() => void handleBatchSetStatus('active')}
+                >
+                  {batchActionBusy ? '处理中…' : '批量启用'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={selectedFileIds.length === 0 || actionsBusy}
+                  onClick={() => void handleBatchSetStatus('disabled')}
+                >
+                  {batchActionBusy ? '处理中…' : '批量禁用'}
+                </button>
+                <button
+                  type="button"
+                  className="danger-button"
+                  disabled={selectedFileIds.length === 0 || actionsBusy}
+                  onClick={() => void handleBatchDelete()}
+                >
+                  {batchActionBusy ? '处理中…' : '批量删除'}
+                </button>
+              </div>
+            </div>
+          </>
+        ) : null}
+
         {filesState === 'loading' ? <p>正在拉取文件列表。</p> : null}
         {filesState === 'error' ? <p className="error-text">{filesError}</p> : null}
         {fileActionMessage ? <p className="notice-text">{fileActionMessage}</p> : null}
-        {files.length > 0 ? (
+        {filteredFiles.length > 0 ? (
           <div className="files-list">
-            {files.map((item) => (
-              <article key={item.id} className="file-item">
-                <div className="file-main">
-                  <strong>{item.displayName}</strong>
-                  <span>{formatBytes(item.size)} · {item.contentType}</span>
-                  <span>状态：{item.status} · 下载次数：{item.downloadCount}</span>
+            {filteredFiles.map((item) => (
+              <article key={item.id} className={`file-item${selectedFileIds.includes(item.id) ? ' is-selected' : ''}`}>
+                <div className="file-item-header">
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={selectedFileIds.includes(item.id)}
+                      disabled={actionsBusy}
+                      onChange={() => handleToggleFileSelection(item.id)}
+                    />
+                    <span>选择</span>
+                  </label>
+
+                  <div className="file-main">
+                    <strong>{item.displayName}</strong>
+                    <span>{formatBytes(item.size)} · {item.contentType}</span>
+                    <span>状态：{item.status} · 下载次数：{item.downloadCount} · Public ID：{item.publicId}</span>
+                  </div>
+
+                  <span className={`status-pill status-${item.status === 'active' ? 'success' : 'error'}`}>{item.status}</span>
                 </div>
+
                 <div className="file-links">
                   <a href={buildShareUrl(item.publicId, item.displayName)} target="_blank" rel="noreferrer">
                     打开分享页
@@ -384,27 +796,30 @@ export function DashboardPage() {
                   </a>
                   <code>{item.downloadUrl}</code>
                 </div>
+
                 <div className="file-actions">
                   <button
                     type="button"
                     className="ghost-button"
-                    disabled={fileActionBusyId === item.id}
-                    onClick={() => handleToggleFileStatus(item)}
+                    disabled={actionsBusy}
+                    onClick={() => void handleToggleFileStatus(item)}
                   >
                     {fileActionBusyId === item.id ? '处理中…' : item.status === 'disabled' ? '重新启用' : '禁用下载'}
                   </button>
                   <button
                     type="button"
                     className="danger-button"
-                    disabled={fileActionBusyId === item.id}
-                    onClick={() => handleDeleteFile(item)}
+                    disabled={actionsBusy}
+                    onClick={() => void handleDeleteFile(item)}
                   >
-                    删除文件
+                    {fileActionBusyId === item.id ? '处理中…' : '删除文件'}
                   </button>
                 </div>
               </article>
             ))}
           </div>
+        ) : filesState === 'success' && files.length > 0 ? (
+          <p>当前筛选条件没有匹配文件。</p>
         ) : filesState === 'success' ? (
           <p>还没有上传任何文件。</p>
         ) : null}
@@ -453,4 +868,55 @@ function formatBytes(size: number): string {
 
 function buildShareUrl(publicId: string, fileName: string): string {
   return new URL(`/share/${publicId}/${encodeURIComponent(fileName)}`, window.location.origin).href
+}
+
+function buildUploadProgress(receivedSize: number, totalSize: number): number {
+  if (totalSize <= 0) {
+    return 0
+  }
+
+  return Math.max(0, Math.min(100, Math.round((receivedSize / totalSize) * 100)))
+}
+
+function getFileFingerprint(file: File): string {
+  return [file.name, file.size, file.lastModified].join(':')
+}
+
+function loadStoredResumableUpload(): StoredResumableUpload | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  try {
+    const raw = window.localStorage.getItem(resumableUploadStorageKey)
+    if (!raw) {
+      return null
+    }
+
+    return JSON.parse(raw) as StoredResumableUpload
+  } catch {
+    return null
+  }
+}
+
+function persistResumableUpload(payload: StoredResumableUpload) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(resumableUploadStorageKey, JSON.stringify(payload))
+}
+
+function clearStoredResumableUpload() {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.removeItem(resumableUploadStorageKey)
+}
+
+interface StoredResumableUpload {
+  uploadToken: string
+  fingerprint: string
+  displayName: string
 }

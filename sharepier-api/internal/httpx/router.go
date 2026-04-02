@@ -42,11 +42,12 @@ type authResponse struct {
 }
 
 type filesResponse struct {
-	Status    string             `json:"status"`
-	Items     []files.FileRecord `json:"items,omitempty"`
-	Item      *files.FileRecord  `json:"item,omitempty"`
-	Message   string             `json:"message,omitempty"`
-	Timestamp string             `json:"timestamp,omitempty"`
+	Status        string             `json:"status"`
+	Items         []files.FileRecord `json:"items,omitempty"`
+	Item          *files.FileRecord  `json:"item,omitempty"`
+	AffectedCount int64              `json:"affectedCount,omitempty"`
+	Message       string             `json:"message,omitempty"`
+	Timestamp     string             `json:"timestamp,omitempty"`
 }
 
 type publicFileResponse struct {
@@ -54,6 +55,14 @@ type publicFileResponse struct {
 	Item      *files.PublicFileRecord `json:"item,omitempty"`
 	Message   string                  `json:"message,omitempty"`
 	Timestamp string                  `json:"timestamp,omitempty"`
+}
+
+type uploadSessionResponse struct {
+	Status    string               `json:"status"`
+	Session   *files.UploadSession `json:"session,omitempty"`
+	Item      *files.FileRecord    `json:"item,omitempty"`
+	Message   string               `json:"message,omitempty"`
+	Timestamp string               `json:"timestamp,omitempty"`
 }
 
 func NewRouter(
@@ -242,6 +251,84 @@ func NewRouter(
 			})
 		})
 
+		r.With(requireAuth(authService)).Post("/files/batch", func(w http.ResponseWriter, r *http.Request) {
+			var payload struct {
+				Action  string  `json:"action"`
+				FileIDs []int64 `json:"fileIds"`
+				Status  string  `json:"status"`
+			}
+			if err := readJSON(r, &payload); err != nil {
+				writeJSON(w, http.StatusBadRequest, filesResponse{
+					Status:    "bad_request",
+					Message:   "invalid request payload",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			action := strings.TrimSpace(strings.ToLower(payload.Action))
+			var (
+				affectedCount int64
+				err           error
+				message       string
+			)
+
+			switch action {
+			case "set_status":
+				affectedCount, err = fileService.SetStatusMany(r.Context(), payload.FileIDs, payload.Status)
+				if err == nil {
+					if strings.EqualFold(payload.Status, "disabled") {
+						message = "files disabled"
+					} else {
+						message = "files enabled"
+					}
+				}
+			case "delete":
+				affectedCount, err = fileService.DeleteMany(r.Context(), payload.FileIDs)
+				if err == nil {
+					message = "files deleted"
+				}
+			default:
+				writeJSON(w, http.StatusBadRequest, filesResponse{
+					Status:    "bad_request",
+					Message:   "unsupported batch action",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				messageText := "failed to process batch action"
+
+				switch {
+				case errors.Is(err, files.ErrNotFound):
+					statusCode = http.StatusNotFound
+					messageText = "files not found"
+				case errors.Is(err, files.ErrInvalidStatus):
+					statusCode = http.StatusBadRequest
+					messageText = "unsupported file status"
+				case errors.Is(err, files.ErrInvalidSelection):
+					statusCode = http.StatusBadRequest
+					messageText = "empty file selection"
+				}
+
+				writeJSON(w, statusCode, filesResponse{
+					Status:    strings.ToLower(strings.ReplaceAll(http.StatusText(statusCode), " ", "_")),
+					Message:   messageText,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			writeJSON(w, http.StatusOK, filesResponse{
+				Status:        "ok",
+				AffectedCount: affectedCount,
+				Message:       message,
+				Timestamp:     time.Now().UTC().Format(time.RFC3339),
+			})
+		})
+
 		r.With(requireAuth(authService)).Delete("/files/{fileID}", func(w http.ResponseWriter, r *http.Request) {
 			fileID, err := parseInt64Param(r, "fileID")
 			if err != nil {
@@ -336,6 +423,185 @@ func NewRouter(
 			}
 
 			writeJSON(w, http.StatusCreated, filesResponse{
+				Status:    "ok",
+				Item:      &record,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+		})
+
+		r.With(requireAuth(authService)).Post("/uploads/resumable/sessions", func(w http.ResponseWriter, r *http.Request) {
+			user, ok := auth.UserFromContext(r.Context())
+			if !ok {
+				writeJSON(w, http.StatusUnauthorized, authResponse{
+					Status:    "unauthorized",
+					Message:   "authentication required",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			var payload struct {
+				OriginalName string `json:"originalName"`
+				DisplayName  string `json:"displayName"`
+				ContentType  string `json:"contentType"`
+				TotalSize    int64  `json:"totalSize"`
+			}
+			if err := readJSON(r, &payload); err != nil {
+				writeJSON(w, http.StatusBadRequest, uploadSessionResponse{
+					Status:    "bad_request",
+					Message:   "invalid request payload",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			session, err := fileService.CreateUploadSession(r.Context(), files.CreateUploadSessionParams{
+				OwnerUserID:  user.ID,
+				OriginalName: payload.OriginalName,
+				DisplayName:  payload.DisplayName,
+				ContentType:  payload.ContentType,
+				TotalSize:    payload.TotalSize,
+			})
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				message := "failed to create upload session"
+				if errors.Is(err, files.ErrInvalidUpload) {
+					statusCode = http.StatusBadRequest
+					message = err.Error()
+				}
+
+				writeJSON(w, statusCode, uploadSessionResponse{
+					Status:    strings.ToLower(strings.ReplaceAll(http.StatusText(statusCode), " ", "_")),
+					Message:   message,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			writeJSON(w, http.StatusCreated, uploadSessionResponse{
+				Status:    "ok",
+				Session:   &session,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+		})
+
+		r.With(requireAuth(authService)).Get("/uploads/resumable/{uploadToken}", func(w http.ResponseWriter, r *http.Request) {
+			session, err := fileService.GetUploadSession(r.Context(), chi.URLParam(r, "uploadToken"))
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				message := "failed to load upload session"
+
+				switch {
+				case errors.Is(err, files.ErrNotFound):
+					statusCode = http.StatusNotFound
+					message = "upload session not found"
+				case errors.Is(err, files.ErrUploadSessionExpired):
+					statusCode = http.StatusGone
+					message = "upload session expired"
+				}
+
+				writeJSON(w, statusCode, uploadSessionResponse{
+					Status:    strings.ToLower(strings.ReplaceAll(http.StatusText(statusCode), " ", "_")),
+					Message:   message,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			writeJSON(w, http.StatusOK, uploadSessionResponse{
+				Status:    "ok",
+				Session:   &session,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+		})
+
+		r.With(requireAuth(authService)).Put("/uploads/resumable/{uploadToken}", func(w http.ResponseWriter, r *http.Request) {
+			offsetHeader := strings.TrimSpace(r.Header.Get("X-Upload-Offset"))
+			if offsetHeader == "" {
+				writeJSON(w, http.StatusBadRequest, uploadSessionResponse{
+					Status:    "bad_request",
+					Message:   "missing x-upload-offset header",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			offset, err := strconv.ParseInt(offsetHeader, 10, 64)
+			if err != nil || offset < 0 {
+				writeJSON(w, http.StatusBadRequest, uploadSessionResponse{
+					Status:    "bad_request",
+					Message:   "invalid upload offset",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			r.Body = http.MaxBytesReader(w, r.Body, cfg.ResumableChunkSize+1)
+			session, err := fileService.AppendUploadChunk(r.Context(), chi.URLParam(r, "uploadToken"), offset, r.Body)
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				message := "failed to append upload chunk"
+
+				switch {
+				case errors.Is(err, files.ErrNotFound):
+					statusCode = http.StatusNotFound
+					message = "upload session not found"
+				case errors.Is(err, files.ErrUploadSessionExpired):
+					statusCode = http.StatusGone
+					message = "upload session expired"
+				case errors.Is(err, files.ErrUploadOffsetMismatch):
+					statusCode = http.StatusConflict
+					message = "upload offset mismatch"
+				case errors.Is(err, files.ErrUploadChunkTooLarge), errors.Is(err, files.ErrInvalidUpload):
+					statusCode = http.StatusBadRequest
+					message = err.Error()
+				case errors.Is(err, files.ErrUploadSessionNotReady):
+					statusCode = http.StatusConflict
+					message = "upload session is not ready for more chunks"
+				}
+
+				writeJSON(w, statusCode, uploadSessionResponse{
+					Status:    strings.ToLower(strings.ReplaceAll(http.StatusText(statusCode), " ", "_")),
+					Message:   message,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			writeJSON(w, http.StatusOK, uploadSessionResponse{
+				Status:    "ok",
+				Session:   &session,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+		})
+
+		r.With(requireAuth(authService)).Post("/uploads/resumable/{uploadToken}/complete", func(w http.ResponseWriter, r *http.Request) {
+			record, err := fileService.CompleteUploadSession(r.Context(), chi.URLParam(r, "uploadToken"))
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				message := "failed to complete upload session"
+
+				switch {
+				case errors.Is(err, files.ErrNotFound):
+					statusCode = http.StatusNotFound
+					message = "upload session not found"
+				case errors.Is(err, files.ErrUploadSessionExpired):
+					statusCode = http.StatusGone
+					message = "upload session expired"
+				case errors.Is(err, files.ErrUploadSessionNotReady):
+					statusCode = http.StatusConflict
+					message = "upload session is not fully uploaded"
+				}
+
+				writeJSON(w, statusCode, uploadSessionResponse{
+					Status:    strings.ToLower(strings.ReplaceAll(http.StatusText(statusCode), " ", "_")),
+					Message:   message,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			writeJSON(w, http.StatusCreated, uploadSessionResponse{
 				Status:    "ok",
 				Item:      &record,
 				Timestamp: time.Now().UTC().Format(time.RFC3339),

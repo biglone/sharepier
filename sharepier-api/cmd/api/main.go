@@ -52,7 +52,7 @@ func main() {
 	}
 
 	authService := auth.NewService(database, cfg, logger)
-	fileService := files.NewService(database, store, cfg.PublicBaseURL)
+	fileService := files.NewService(database, store, cfg.PublicBaseURL, cfg.ResumableChunkSize, cfg.UploadSessionTTL)
 	router := httpx.NewRouter(cfg, logger, store, authService, fileService)
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 
