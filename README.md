@@ -4,7 +4,7 @@
 
 ## 当前骨架
 
-- `sharepier-web`: `React + Vite + TypeScript` 管理台、搜索/筛选/批量操作、分享策略配置、审计/下载操作记录（含筛选 / CSV 导出）与公开分享页，当前走静态构建产物服务
+- `sharepier-web`: `React + Vite + TypeScript` 管理台、搜索/筛选/批量操作、分享策略配置、审计/下载操作记录（含筛选 / CSV 导出）、存储配额与用量统计，以及公开分享页，当前走静态构建产物服务
 - `sharepier-api`: `Go + chi` API、管理员登录、普通上传、分片上传/续传、列表、禁用、删除、公开下载、公开文件元数据、分享策略鉴权、审计日志，以及 `local/S3-compatible` 对象存储后端
 - `docker-compose.yml`: 本地开发依赖与容器化运行入口
 - `cloudflared/config.yml.example`: Tunnel 配置示例
@@ -51,6 +51,7 @@ Compose 已为容器注入 `host.docker.internal -> host-gateway`，便于这种
 - 默认普通上传入口受 `SHAREPIER_MAX_UPLOAD_SIZE` 控制；大文件分片上传走独立会话，单片大小由 `SHAREPIER_RESUMABLE_CHUNK_SIZE` 控制，会话过期时间由 `SHAREPIER_UPLOAD_SESSION_TTL` 控制
 - 分享策略支持三类限制：失效时间、访问密码、最大下载次数；密码保护通过短期 HttpOnly Cookie 解锁，密钥由 `SHAREPIER_SHARE_ACCESS_SECRET` 提供
 - 存储后端默认是 `local`；将 `SHAREPIER_STORAGE_BACKEND=s3` 后，可切换到任意兼容 `S3 API` 的对象存储（如 `MinIO`、`AWS S3`、`Cloudflare R2`）
+- `SHAREPIER_STORAGE_QUOTA_BYTES` 可选；设置后管理台会展示配额、已用空间、剩余空间和用量百分比，默认 `0` 表示不设置上限
 
 启动后默认地址：
 
@@ -192,5 +193,5 @@ docker compose up -d sharepier-api
 
 - 将管理员密码替换成你自己的长期密码
 - 将 `SHAREPIER_SHARE_ACCESS_SECRET` 换成独立随机长串
-- 增加存储配额与用量统计
+- 增加真正的上传前配额拦截
 - 增加审计日志分页与更多筛选维度

@@ -11,6 +11,7 @@ import {
   getCurrentUser,
   getHealth,
   getResumableUploadSession,
+  getStorageStats,
   listAuditLogs,
   listFiles,
   logout,
@@ -22,6 +23,7 @@ import {
   type AuthUser,
   type FileRecord,
   type HealthResponse,
+  type StorageStatsResponse,
   type UploadSessionRecord,
 } from '../lib/api'
 import { env } from '../lib/env'
@@ -74,6 +76,9 @@ export function DashboardPage() {
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([])
   const [auditState, setAuditState] = useState<AuditState>('idle')
   const [auditError, setAuditError] = useState<string | null>(null)
+  const [storageStats, setStorageStats] = useState<StorageStatsResponse | null>(null)
+  const [storageState, setStorageState] = useState<LoadState>('idle')
+  const [storageError, setStorageError] = useState<string | null>(null)
   const [auditQuery, setAuditQuery] = useState('')
   const [auditActionFilter, setAuditActionFilter] = useState<AuditActionFilter>('all')
   const [auditFrom, setAuditFrom] = useState('')
@@ -191,10 +196,12 @@ export function DashboardPage() {
     if (authState !== 'authenticated') {
       setFiles([])
       setAuditLogs([])
+      setStorageStats(null)
       setSelectedFileIds([])
       setSharePolicyDrafts({})
       setFilesState('idle')
       setAuditState('idle')
+      setStorageState('idle')
       return
     }
 
@@ -235,8 +242,27 @@ export function DashboardPage() {
       }
     }
 
+    async function loadStorageUsage() {
+      setStorageState('loading')
+      try {
+        const result = await getStorageStats()
+        if (!cancelled) {
+          setStorageStats(result)
+          setStorageError(null)
+          setStorageState('success')
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setStorageStats(null)
+          setStorageError(err instanceof Error ? err.message : 'Unknown error')
+          setStorageState('error')
+        }
+      }
+    }
+
     void loadFiles()
     void loadAuditEntries()
+    void loadStorageUsage()
 
     return () => {
       cancelled = true
@@ -275,12 +301,32 @@ export function DashboardPage() {
     }
   }
 
+  async function refreshStorageStats() {
+    setStorageState('loading')
+    try {
+      const next = await getStorageStats()
+      setStorageStats(next)
+      setStorageError(null)
+      setStorageState('success')
+    } catch (err) {
+      setStorageStats(null)
+      setStorageError(err instanceof Error ? err.message : 'Unknown error')
+      setStorageState('error')
+      throw err
+    }
+  }
+
   async function refreshAdminData() {
     await refreshFiles()
     try {
       await refreshAuditLogs()
     } catch {
       // 审计日志刷新失败时，不影响主操作结果提示
+    }
+    try {
+      await refreshStorageStats()
+    } catch {
+      // 统计刷新失败时，不影响主操作结果提示
     }
   }
 
@@ -354,10 +400,12 @@ export function DashboardPage() {
       setAuthState('unauthenticated')
       setFiles([])
       setAuditLogs([])
+      setStorageStats(null)
       setSelectedFileIds([])
       setSharePolicyDrafts({})
       setFilesState('idle')
       setAuditState('idle')
+      setStorageState('idle')
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : 'Unknown error')
       setAuthState('error')
@@ -880,6 +928,85 @@ export function DashboardPage() {
         {state === 'error' ? <p className="error-text">{error}</p> : null}
       </section>
 
+      <section className="card storage-card">
+        <div className="section-title-row">
+          <div>
+            <p className="eyebrow">Storage</p>
+            <h3>存储配额与用量</h3>
+          </div>
+          <span className={`status-pill status-${storageState}`}>{storageState}</span>
+        </div>
+
+        {authState === 'authenticated' ? (
+          <>
+            {storageState === 'loading' ? <p>正在拉取存储统计。</p> : null}
+            {storageState === 'error' ? <p className="error-text">{storageError}</p> : null}
+            {storageState === 'success' && storageStats?.stats ? (
+              <>
+                {typeof storageStats.quotaBytes === 'number' && storageStats.quotaBytes > 0 ? (
+                  <div className="progress-panel">
+                    <div className="progress-copy">
+                      <strong>
+                        已用 {formatBytes(storageStats.stats.storedBytes)} / {formatBytes(storageStats.quotaBytes)}
+                      </strong>
+                      <span>{formatPercent(storageStats.usagePercent)}</span>
+                    </div>
+                    <div className="progress-track" aria-hidden="true">
+                      <div
+                        className="progress-value"
+                        style={{ width: `${Math.max(0, Math.min(100, storageStats.usagePercent ?? 0))}%` }}
+                      />
+                    </div>
+                    <p className="subtle-text">
+                      剩余 {formatBytes(storageStats.remainingBytes ?? Math.max(storageStats.quotaBytes - storageStats.stats.storedBytes, 0))}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="subtle-text">当前未设置配额上限，以下展示实际已使用的对象存储统计。</p>
+                )}
+
+                <dl className="kv-grid compact-kv-grid">
+                  <div>
+                    <dt>Storage Backend</dt>
+                    <dd>{storageStats.storageBackend}</dd>
+                  </div>
+                  <div>
+                    <dt>Storage Location</dt>
+                    <dd>{storageStats.storageLocation}</dd>
+                  </div>
+                  <div>
+                    <dt>Stored Bytes</dt>
+                    <dd>{formatBytes(storageStats.stats.storedBytes)}</dd>
+                  </div>
+                  <div>
+                    <dt>Object Count</dt>
+                    <dd>{storageStats.stats.objectCount}</dd>
+                  </div>
+                  <div>
+                    <dt>Total Files</dt>
+                    <dd>{storageStats.stats.totalFiles}</dd>
+                  </div>
+                  <div>
+                    <dt>Active / Disabled</dt>
+                    <dd>{storageStats.stats.activeFiles} / {storageStats.stats.disabledFiles}</dd>
+                  </div>
+                  <div>
+                    <dt>Total Downloads</dt>
+                    <dd>{storageStats.stats.totalDownloads}</dd>
+                  </div>
+                  <div>
+                    <dt>Latest Object</dt>
+                    <dd>{storageStats.stats.latestObjectAt ? formatDateTime(storageStats.stats.latestObjectAt) : '暂无数据'}</dd>
+                  </div>
+                </dl>
+              </>
+            ) : null}
+          </>
+        ) : (
+          <p>请先登录管理员账号后查看存储统计。</p>
+        )}
+      </section>
+
       <section className="card">
         <div className="section-title-row">
           <div>
@@ -1374,6 +1501,14 @@ function formatBytes(size: number): string {
   }
 
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`
+}
+
+function formatPercent(value?: number): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return '—'
+  }
+
+  return `${value.toFixed(value >= 10 ? 0 : 1)}%`
 }
 
 function formatAuditActionLabel(action: string): string {

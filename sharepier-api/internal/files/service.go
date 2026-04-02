@@ -44,6 +44,16 @@ type Service struct {
 	shareAccessTTL     time.Duration
 }
 
+type StorageStats struct {
+	TotalFiles     int64      `json:"totalFiles"`
+	ActiveFiles    int64      `json:"activeFiles"`
+	DisabledFiles  int64      `json:"disabledFiles"`
+	TotalDownloads int64      `json:"totalDownloads"`
+	ObjectCount    int64      `json:"objectCount"`
+	StoredBytes    int64      `json:"storedBytes"`
+	LatestObjectAt *time.Time `json:"latestObjectAt,omitempty"`
+}
+
 type UploadParams struct {
 	OwnerUserID  int64
 	OriginalName string
@@ -319,6 +329,43 @@ func (s *Service) List(ctx context.Context) ([]FileRecord, error) {
 	}
 
 	return items, nil
+}
+
+func (s *Service) StorageStats(ctx context.Context) (StorageStats, error) {
+	var (
+		stats          StorageStats
+		latestObjectAt sql.NullTime
+	)
+
+	err := s.db.QueryRowContext(
+		ctx,
+		`select
+			coalesce((select count(*) from files), 0),
+			coalesce((select count(*) from files where status = 'active'), 0),
+			coalesce((select count(*) from files where status = 'disabled'), 0),
+			coalesce((select sum(download_count) from files), 0),
+			coalesce((select count(*) from objects), 0),
+			coalesce((select sum(size) from objects), 0),
+			(select max(created_at) from objects)`,
+	).Scan(
+		&stats.TotalFiles,
+		&stats.ActiveFiles,
+		&stats.DisabledFiles,
+		&stats.TotalDownloads,
+		&stats.ObjectCount,
+		&stats.StoredBytes,
+		&latestObjectAt,
+	)
+	if err != nil {
+		return StorageStats{}, err
+	}
+
+	if latestObjectAt.Valid {
+		value := latestObjectAt.Time.UTC()
+		stats.LatestObjectAt = &value
+	}
+
+	return stats, nil
 }
 
 func (s *Service) GetByID(ctx context.Context, fileID int64) (FileRecord, error) {

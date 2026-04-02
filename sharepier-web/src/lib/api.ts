@@ -130,6 +130,29 @@ export interface AuditLogsResponse {
   timestamp?: string
 }
 
+export interface StorageStats {
+  totalFiles: number
+  activeFiles: number
+  disabledFiles: number
+  totalDownloads: number
+  objectCount: number
+  storedBytes: number
+  latestObjectAt?: string
+}
+
+export interface StorageStatsResponse {
+  status: string
+  stats?: StorageStats
+  storageBackend?: string
+  storageLocation?: string
+  storageRoot?: string
+  quotaBytes?: number
+  remainingBytes?: number
+  usagePercent?: number
+  message?: string
+  timestamp?: string
+}
+
 export interface AuditLogListParams {
   limit?: number
   action?: string
@@ -195,6 +218,10 @@ export function logout(): Promise<AuthResponse> {
 
 export function listFiles(): Promise<FilesResponse> {
   return requestJSON<FilesResponse>('/api/v1/files')
+}
+
+export function getStorageStats(): Promise<StorageStatsResponse> {
+  return requestJSON<StorageStatsResponse>('/api/v1/stats/storage')
 }
 
 export function listAuditLogs(params: AuditLogListParams = {}): Promise<AuditLogsResponse> {

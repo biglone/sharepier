@@ -80,6 +80,19 @@ type auditLogsResponse struct {
 	Timestamp string         `json:"timestamp,omitempty"`
 }
 
+type storageStatsResponse struct {
+	Status          string              `json:"status"`
+	Stats           *files.StorageStats `json:"stats,omitempty"`
+	StorageBackend  string              `json:"storageBackend,omitempty"`
+	StorageLocation string              `json:"storageLocation,omitempty"`
+	StorageRoot     string              `json:"storageRoot,omitempty"`
+	QuotaBytes      int64               `json:"quotaBytes,omitempty"`
+	RemainingBytes  *int64              `json:"remainingBytes,omitempty"`
+	UsagePercent    *float64            `json:"usagePercent,omitempty"`
+	Message         string              `json:"message,omitempty"`
+	Timestamp       string              `json:"timestamp,omitempty"`
+}
+
 func NewRouter(
 	cfg config.Config,
 	logger *slog.Logger,
@@ -316,6 +329,47 @@ func NewRouter(
 				Items:     items,
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 			})
+		})
+
+		r.With(requireAuth(authService)).Get("/stats/storage", func(w http.ResponseWriter, r *http.Request) {
+			stats, err := fileService.StorageStats(r.Context())
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, storageStatsResponse{
+					Status:    "error",
+					Message:   "failed to load storage stats",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			response := storageStatsResponse{
+				Status:          "ok",
+				Stats:           &stats,
+				StorageBackend:  store.Backend(),
+				StorageLocation: store.Location(),
+				StorageRoot:     store.Root(),
+				QuotaBytes:      cfg.StorageQuotaBytes,
+				Timestamp:       time.Now().UTC().Format(time.RFC3339),
+			}
+
+			if cfg.StorageQuotaBytes > 0 {
+				remaining := cfg.StorageQuotaBytes - stats.StoredBytes
+				if remaining < 0 {
+					remaining = 0
+				}
+				usagePercent := float64(stats.StoredBytes) / float64(cfg.StorageQuotaBytes) * 100
+				if usagePercent < 0 {
+					usagePercent = 0
+				}
+				if usagePercent > 100 {
+					usagePercent = 100
+				}
+
+				response.RemainingBytes = &remaining
+				response.UsagePercent = &usagePercent
+			}
+
+			writeJSON(w, http.StatusOK, response)
 		})
 
 		r.With(requireAuth(authService)).Get("/files", func(w http.ResponseWriter, r *http.Request) {

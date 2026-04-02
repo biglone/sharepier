@@ -34,6 +34,7 @@ type Config struct {
 	S3UsePathStyle         bool
 	S3Prefix               string
 	S3AutoCreateBucket     bool
+	StorageQuotaBytes      int64
 	PublicBaseURL          string
 	MaxUploadSize          int64
 	ResumableChunkSize     int64
@@ -72,6 +73,7 @@ func Load() Config {
 		S3UsePathStyle:         getEnvAsBool("SHAREPIER_S3_USE_PATH_STYLE", false),
 		S3Prefix:               getEnv("SHAREPIER_S3_PREFIX", ""),
 		S3AutoCreateBucket:     getEnvAsBool("SHAREPIER_S3_AUTO_CREATE_BUCKET", true),
+		StorageQuotaBytes:      getEnvAsInt64("SHAREPIER_STORAGE_QUOTA_BYTES", 0),
 		PublicBaseURL:          getEnv("SHAREPIER_PUBLIC_BASE_URL", "http://localhost:8080"),
 		MaxUploadSize:          getEnvAsInt64("SHAREPIER_MAX_UPLOAD_SIZE", 100<<20),
 		ResumableChunkSize:     getEnvAsInt64("SHAREPIER_RESUMABLE_CHUNK_SIZE", 8<<20),
