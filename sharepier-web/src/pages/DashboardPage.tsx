@@ -13,6 +13,7 @@ import {
   listFiles,
   logout,
   setFileStatus,
+  updateSharePolicy,
   uploadResumableChunk,
   uploadFile,
   type AuthUser,
@@ -30,10 +31,18 @@ type FileStatusFilter = 'all' | 'active' | 'disabled'
 const milestones = [
   'M0-M9 已完成：骨架、登录、普通上传、分片上传/续传、搜索/筛选、批量操作、下载、禁用/删除、正式域名、分享页、静态前端服务',
   'M10: S3 兼容对象存储切换能力',
-  'M11: 细化权限与分享策略（过期、密码、单次下载）',
+  'M11 已完成：分享策略（过期、密码、单次下载）',
 ]
 
 const resumableUploadStorageKey = 'sharepier.resumable-upload'
+
+type SharePolicyDraft = {
+  expiresAt: string
+  downloadMode: 'unlimited' | 'single' | 'custom'
+  maxDownloads: string
+  passwordMode: 'keep' | 'clear' | 'set'
+  password: string
+}
 
 export function DashboardPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null)
@@ -61,6 +70,8 @@ export function DashboardPage() {
   const [selectedFileIds, setSelectedFileIds] = useState<number[]>([])
   const [fileActionBusyId, setFileActionBusyId] = useState<number | null>(null)
   const [batchActionBusy, setBatchActionBusy] = useState(false)
+  const [sharePolicyBusyId, setSharePolicyBusyId] = useState<number | null>(null)
+  const [sharePolicyDrafts, setSharePolicyDrafts] = useState<Record<number, SharePolicyDraft>>({})
   const [fileActionMessage, setFileActionMessage] = useState<string | null>(null)
 
   const filteredFiles = useMemo(() => {
@@ -88,7 +99,7 @@ export function DashboardPage() {
     filteredFiles.length > 0 &&
     filteredFiles.every((item) => selectedFileIds.includes(item.id))
 
-  const actionsBusy = batchActionBusy || fileActionBusyId !== null
+  const actionsBusy = batchActionBusy || fileActionBusyId !== null || sharePolicyBusyId !== null
 
   useEffect(() => {
     let cancelled = false
@@ -148,6 +159,7 @@ export function DashboardPage() {
     if (authState !== 'authenticated') {
       setFiles([])
       setSelectedFileIds([])
+      setSharePolicyDrafts({})
       setFilesState('idle')
       return
     }
@@ -181,6 +193,11 @@ export function DashboardPage() {
   function applyFiles(nextFiles: FileRecord[]) {
     setFiles(nextFiles)
     setSelectedFileIds((current) => current.filter((id) => nextFiles.some((item) => item.id === id)))
+    setSharePolicyDrafts((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([key]) => nextFiles.some((item) => item.id === Number(key))),
+      ) as Record<number, SharePolicyDraft>,
+    )
     setFilesError(null)
     setFilesState('success')
   }
@@ -188,6 +205,23 @@ export function DashboardPage() {
   async function refreshFiles() {
     const next = await listFiles()
     applyFiles(next.items ?? [])
+  }
+
+  function getSharePolicyDraft(item: FileRecord): SharePolicyDraft {
+    return sharePolicyDrafts[item.id] ?? createSharePolicyDraft(item)
+  }
+
+  function updateSharePolicyDraft(fileId: number, patch: Partial<SharePolicyDraft>) {
+    setSharePolicyDrafts((current) => {
+      const base = current[fileId] ?? createSharePolicyDraft(files.find((item) => item.id === fileId))
+      return {
+        ...current,
+        [fileId]: {
+          ...base,
+          ...patch,
+        },
+      }
+    })
   }
 
   async function handleLogout() {
@@ -198,10 +232,51 @@ export function DashboardPage() {
       setAuthState('unauthenticated')
       setFiles([])
       setSelectedFileIds([])
+      setSharePolicyDrafts({})
       setFilesState('idle')
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : 'Unknown error')
       setAuthState('error')
+    }
+  }
+
+  async function handleSharePolicySubmit(item: FileRecord) {
+    const draft = getSharePolicyDraft(item)
+    let maxDownloads: number | null = null
+
+    if (draft.downloadMode === 'single') {
+      maxDownloads = 1
+    } else if (draft.downloadMode === 'custom') {
+      const parsed = Number.parseInt(draft.maxDownloads, 10)
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        setFileActionMessage(`文件 ${item.displayName} 的下载次数限制无效`)
+        return
+      }
+      maxDownloads = parsed
+    }
+
+    setSharePolicyBusyId(item.id)
+    setFileActionMessage(null)
+    try {
+      const result = await updateSharePolicy(item.id, {
+        expiresAt: draft.expiresAt ? new Date(draft.expiresAt).toISOString() : null,
+        maxDownloads,
+        passwordMode: draft.passwordMode,
+        password: draft.password,
+      })
+
+      if (result.item) {
+        setFiles((current) => current.map((entry) => (entry.id === result.item?.id ? result.item : entry)))
+        setSharePolicyDrafts((current) => ({
+          ...current,
+          [item.id]: createSharePolicyDraft(result.item),
+        }))
+      }
+      setFileActionMessage(`已更新 ${item.displayName} 的分享策略`)
+    } catch (err) {
+      setFileActionMessage(err instanceof Error ? err.message : '更新分享策略失败')
+    } finally {
+      setSharePolicyBusyId(null)
     }
   }
 
@@ -781,6 +856,7 @@ export function DashboardPage() {
                     <strong>{item.displayName}</strong>
                     <span>{formatBytes(item.size)} · {item.contentType}</span>
                     <span>状态：{item.status} · 下载次数：{item.downloadCount} · Public ID：{item.publicId}</span>
+                    <span>分享策略：{formatSharePolicySummary(item)}</span>
                   </div>
 
                   <span className={`status-pill status-${item.status === 'active' ? 'success' : 'error'}`}>{item.status}</span>
@@ -796,6 +872,10 @@ export function DashboardPage() {
                   </a>
                   <code>{item.downloadUrl}</code>
                 </div>
+
+                {item.passwordProtected ? (
+                  <p className="subtle-text">已启用访问密码。访客需先打开分享页输入密码，之后下载直链才可用。</p>
+                ) : null}
 
                 <div className="file-actions">
                   <button
@@ -815,6 +895,101 @@ export function DashboardPage() {
                     {fileActionBusyId === item.id ? '处理中…' : '删除文件'}
                   </button>
                 </div>
+
+                <details className="share-policy-panel">
+                  <summary>配置分享策略</summary>
+                  <div className="share-policy-grid">
+                    <label className="filter-field">
+                      失效时间
+                      <input
+                        type="datetime-local"
+                        value={getSharePolicyDraft(item).expiresAt}
+                        onChange={(event) => updateSharePolicyDraft(item.id, { expiresAt: event.target.value })}
+                      />
+                    </label>
+
+                    <label className="filter-field">
+                      下载限制
+                      <select
+                        value={getSharePolicyDraft(item).downloadMode}
+                        onChange={(event) =>
+                          updateSharePolicyDraft(item.id, {
+                            downloadMode: event.target.value as SharePolicyDraft['downloadMode'],
+                          })
+                        }
+                      >
+                        <option value="unlimited">不限次数</option>
+                        <option value="single">单次下载</option>
+                        <option value="custom">自定义次数</option>
+                      </select>
+                    </label>
+
+                    {getSharePolicyDraft(item).downloadMode === 'custom' ? (
+                      <label className="filter-field">
+                        最大下载次数
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={getSharePolicyDraft(item).maxDownloads}
+                          onChange={(event) => updateSharePolicyDraft(item.id, { maxDownloads: event.target.value })}
+                        />
+                      </label>
+                    ) : null}
+
+                    <label className="filter-field">
+                      密码策略
+                      <select
+                        value={getSharePolicyDraft(item).passwordMode}
+                        onChange={(event) =>
+                          updateSharePolicyDraft(item.id, {
+                            passwordMode: event.target.value as SharePolicyDraft['passwordMode'],
+                            ...(event.target.value !== 'set' ? { password: '' } : {}),
+                          })
+                        }
+                      >
+                        {item.passwordProtected ? <option value="keep">保留当前密码</option> : <option value="clear">无访问密码</option>}
+                        <option value="set">设置新密码</option>
+                        {item.passwordProtected ? <option value="clear">移除访问密码</option> : null}
+                      </select>
+                    </label>
+
+                    {getSharePolicyDraft(item).passwordMode === 'set' ? (
+                      <label className="filter-field">
+                        新访问密码
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          placeholder="仅分享页访客需要输入"
+                          value={getSharePolicyDraft(item).password}
+                          onChange={(event) => updateSharePolicyDraft(item.id, { password: event.target.value })}
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+
+                  <div className="file-actions">
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      disabled={actionsBusy}
+                      onClick={() =>
+                        updateSharePolicyDraft(item.id, {
+                          ...createSharePolicyDraft(item),
+                        })
+                      }
+                    >
+                      重置表单
+                    </button>
+                    <button
+                      type="button"
+                      disabled={actionsBusy}
+                      onClick={() => void handleSharePolicySubmit(item)}
+                    >
+                      {sharePolicyBusyId === item.id ? '保存中…' : '保存分享策略'}
+                    </button>
+                  </div>
+                </details>
               </article>
             ))}
           </div>
@@ -850,6 +1025,48 @@ export function DashboardPage() {
   )
 }
 
+function createSharePolicyDraft(item?: FileRecord): SharePolicyDraft {
+  if (!item) {
+    return {
+      expiresAt: '',
+      downloadMode: 'unlimited',
+      maxDownloads: '3',
+      passwordMode: 'clear',
+      password: '',
+    }
+  }
+
+  const maxDownloads = item.maxDownloads
+  return {
+    expiresAt: toDatetimeLocalValue(item.expiresAt),
+    downloadMode: maxDownloads === 1 ? 'single' : maxDownloads ? 'custom' : 'unlimited',
+    maxDownloads: maxDownloads && maxDownloads !== 1 ? String(maxDownloads) : '3',
+    passwordMode: item.passwordProtected ? 'keep' : 'clear',
+    password: '',
+  }
+}
+
+function formatSharePolicySummary(item: FileRecord): string {
+  const parts = ['永久']
+
+  if (item.expiresAt) {
+    parts[0] = `到 ${formatDateTime(item.expiresAt)} 失效`
+  }
+
+  if (item.passwordProtected) {
+    parts.push('密码保护')
+  }
+
+  if (item.maxDownloads === 1) {
+    parts.push('单次下载')
+  } else if (item.maxDownloads) {
+    const remaining = item.remainingDownloads ?? Math.max(item.maxDownloads - item.downloadCount, 0)
+    parts.push(`最多 ${item.maxDownloads} 次，剩余 ${remaining} 次`)
+  }
+
+  return parts.join(' · ')
+}
+
 function formatBytes(size: number): string {
   if (size < 1024) {
     return `${size} B`
@@ -868,6 +1085,20 @@ function formatBytes(size: number): string {
 
 function buildShareUrl(publicId: string, fileName: string): string {
   return new URL(`/share/${publicId}/${encodeURIComponent(fileName)}`, window.location.origin).href
+}
+
+function toDatetimeLocalValue(value?: string): string {
+  if (!value) {
+    return ''
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000)
+  return localDate.toISOString().slice(0, 16)
 }
 
 function buildUploadProgress(receivedSize: number, totalSize: number): number {
@@ -919,4 +1150,16 @@ interface StoredResumableUpload {
   uploadToken: string
   fingerprint: string
   displayName: string
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return new Intl.DateTimeFormat('zh-CN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date)
 }

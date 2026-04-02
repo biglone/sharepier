@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ApiError, getPublicFile, type PublicFileRecord } from '../lib/api'
+import { ApiError, getPublicFile, unlockPublicFile, type PublicFileRecord } from '../lib/api'
 
 export function PublicDownloadPage() {
   const { publicId } = useParams()
   const [item, setItem] = useState<PublicFileRecord | null>(null)
-  const [state, setState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+  const [state, setState] = useState<'idle' | 'loading' | 'locked' | 'success' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
   const [copyMessage, setCopyMessage] = useState<string | null>(null)
+  const [password, setPassword] = useState('')
+  const [unlocking, setUnlocking] = useState(false)
 
   useEffect(() => {
     const targetPublicId = publicId
@@ -35,10 +38,24 @@ export function PublicDownloadPage() {
           return
         }
 
+        if (err instanceof ApiError && err.status === 401) {
+          setItem(null)
+          setState('locked')
+          setError('此分享已启用访问密码，请先输入密码再下载。')
+          return
+        }
+
         if (err instanceof ApiError && err.status === 404) {
           setItem(null)
           setState('error')
           setError('文件不存在、已被禁用，或分享链接已失效。')
+          return
+        }
+
+        if (err instanceof ApiError && err.status === 410) {
+          setItem(null)
+          setState('error')
+          setError('该分享已过期，或允许的下载次数已经用尽。')
           return
         }
 
@@ -74,6 +91,43 @@ export function PublicDownloadPage() {
       setCopyMessage('分享链接已复制')
     } catch {
       setCopyMessage('复制失败，请手动复制下方链接。')
+    }
+  }
+
+  async function handleUnlock(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!publicId) {
+      return
+    }
+    if (password.trim() === '') {
+      setError('请输入访问密码')
+      return
+    }
+
+    setUnlocking(true)
+    setError(null)
+    try {
+      const result = await unlockPublicFile(publicId, password)
+      setItem(result.item ?? null)
+      setPassword('')
+      setState(result.item ? 'success' : 'error')
+      setError(result.item ? null : '密码验证成功，但文件仍不可用')
+    } catch (err) {
+      setItem(null)
+      setState('locked')
+      if (err instanceof ApiError && err.status === 401) {
+        setError('访问密码错误')
+      } else if (err instanceof ApiError && err.status === 410) {
+        setState('error')
+        setError('该分享已过期，或允许的下载次数已经用尽。')
+      } else if (err instanceof ApiError && err.status === 404) {
+        setState('error')
+        setError('文件不存在、已被禁用，或分享链接已失效。')
+      } else {
+        setError(err instanceof Error ? err.message : '密码验证失败')
+      }
+    } finally {
+      setUnlocking(false)
     }
   }
 
@@ -117,6 +171,35 @@ export function PublicDownloadPage() {
         </div>
       ) : null}
 
+      {state === 'locked' ? (
+        <div className="public-empty-state public-locked-state">
+          <p className="eyebrow">SharePier Protected Link</p>
+          <h2>此分享已启用访问密码</h2>
+          <p>输入分享方提供的访问密码后，当前浏览器会获得短期访问权限，随后可直接下载文件。</p>
+          <form className="public-password-form" onSubmit={(event) => void handleUnlock(event)}>
+            <label>
+              访问密码
+              <input
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="请输入访问密码"
+              />
+            </label>
+            <button type="submit" disabled={unlocking}>
+              {unlocking ? '验证中…' : '验证并继续'}
+            </button>
+          </form>
+          {error ? <p className="error-text">{error}</p> : null}
+          <div className="public-actions">
+            <Link className="ghost-button" to="/">
+              返回首页
+            </Link>
+          </div>
+        </div>
+      ) : null}
+
       {state === 'success' && item ? (
         <>
           <div className="public-file-hero">
@@ -126,7 +209,7 @@ export function PublicDownloadPage() {
             <div className="public-file-copy">
               <p className="eyebrow">SharePier Public Link</p>
               <h2>{item.displayName}</h2>
-              <p>文件已就绪。你可以直接下载，也可以继续分发当前分享页链接或底部的下载直链。</p>
+              <p>{buildPublicSummary(item)}</p>
             </div>
           </div>
 
@@ -158,6 +241,18 @@ export function PublicDownloadPage() {
               <span className="stat-label">最近更新</span>
               <strong>{formatDateTime(item.updatedAt)}</strong>
             </article>
+            {item.expiresAt ? (
+              <article className="stat-card">
+                <span className="stat-label">失效时间</span>
+                <strong>{formatDateTime(item.expiresAt)}</strong>
+              </article>
+            ) : null}
+            {item.maxDownloads ? (
+              <article className="stat-card">
+                <span className="stat-label">剩余下载</span>
+                <strong>{item.remainingDownloads ?? Math.max(item.maxDownloads - item.downloadCount, 0)} / {item.maxDownloads}</strong>
+              </article>
+            ) : null}
           </div>
 
           <dl className="kv-grid public-meta-grid">
@@ -182,6 +277,10 @@ export function PublicDownloadPage() {
               </dd>
             </div>
             <div>
+              <dt>分享策略</dt>
+              <dd>{formatSharePolicy(item)}</dd>
+            </div>
+            <div>
               <dt>SHA-256</dt>
               <dd className="hash-value">{item.sha256}</dd>
             </div>
@@ -198,6 +297,44 @@ export function PublicDownloadPage() {
 
 function buildShareUrl(publicId: string, fileName: string): string {
   return new URL(`/share/${publicId}/${encodeURIComponent(fileName)}`, window.location.origin).href
+}
+
+function buildPublicSummary(item: PublicFileRecord): string {
+  const notes: string[] = []
+
+  if (item.passwordProtected) {
+    notes.push('当前链接已通过访问密码解锁。')
+  }
+  if (item.expiresAt) {
+    notes.push(`分享将在 ${formatDateTime(item.expiresAt)} 失效。`)
+  }
+  if (item.maxDownloads) {
+    notes.push(`还剩 ${item.remainingDownloads ?? Math.max(item.maxDownloads - item.downloadCount, 0)} / ${item.maxDownloads} 次下载机会。`)
+  }
+
+  if (notes.length === 0) {
+    return '文件已就绪。你可以直接下载，也可以继续分发当前分享页链接或底部的下载直链。'
+  }
+
+  return `文件已就绪。${notes.join(' ')}`
+}
+
+function formatSharePolicy(item: PublicFileRecord): string {
+  const parts = ['永久可下载']
+
+  if (item.expiresAt) {
+    parts[0] = `到 ${formatDateTime(item.expiresAt)} 失效`
+  }
+  if (item.passwordProtected) {
+    parts.push('访问密码已启用')
+  }
+  if (item.maxDownloads === 1) {
+    parts.push('单次下载')
+  } else if (item.maxDownloads) {
+    parts.push(`最多 ${item.maxDownloads} 次`)
+  }
+
+  return parts.join(' · ')
 }
 
 function getFileExtension(fileName: string): string {

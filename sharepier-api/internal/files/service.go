@@ -2,6 +2,7 @@ package files
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -14,8 +15,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"sharepier-api/internal/storage"
 )
@@ -24,6 +28,11 @@ var ErrInvalidUpload = errors.New("invalid upload")
 var ErrNotFound = errors.New("file not found")
 var ErrInvalidStatus = errors.New("invalid file status")
 var ErrInvalidSelection = errors.New("invalid file selection")
+var ErrInvalidSharePolicy = errors.New("invalid share policy")
+var ErrShareExpired = errors.New("share expired")
+var ErrSharePasswordRequired = errors.New("share password required")
+var ErrSharePasswordInvalid = errors.New("share password invalid")
+var ErrShareDownloadLimitReached = errors.New("share download limit reached")
 
 type Service struct {
 	db                 *sql.DB
@@ -31,6 +40,8 @@ type Service struct {
 	publicBaseURL      string
 	resumableChunkSize int64
 	uploadSessionTTL   time.Duration
+	shareAccessSecret  string
+	shareAccessTTL     time.Duration
 }
 
 type UploadParams struct {
@@ -41,31 +52,39 @@ type UploadParams struct {
 }
 
 type FileRecord struct {
-	ID            int64     `json:"id"`
-	PublicID      string    `json:"publicId"`
-	OriginalName  string    `json:"originalName"`
-	DisplayName   string    `json:"displayName"`
-	Status        string    `json:"status"`
-	Visibility    string    `json:"visibility"`
-	ContentType   string    `json:"contentType"`
-	Size          int64     `json:"size"`
-	DownloadCount int64     `json:"downloadCount"`
-	DownloadURL   string    `json:"downloadUrl"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	ID                 int64      `json:"id"`
+	PublicID           string     `json:"publicId"`
+	OriginalName       string     `json:"originalName"`
+	DisplayName        string     `json:"displayName"`
+	Status             string     `json:"status"`
+	Visibility         string     `json:"visibility"`
+	ContentType        string     `json:"contentType"`
+	Size               int64      `json:"size"`
+	DownloadCount      int64      `json:"downloadCount"`
+	DownloadURL        string     `json:"downloadUrl"`
+	ExpiresAt          *time.Time `json:"expiresAt,omitempty"`
+	MaxDownloads       *int64     `json:"maxDownloads,omitempty"`
+	RemainingDownloads *int64     `json:"remainingDownloads,omitempty"`
+	PasswordProtected  bool       `json:"passwordProtected"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
 }
 
 type PublicFileRecord struct {
-	PublicID      string    `json:"publicId"`
-	OriginalName  string    `json:"originalName"`
-	DisplayName   string    `json:"displayName"`
-	ContentType   string    `json:"contentType"`
-	Size          int64     `json:"size"`
-	DownloadCount int64     `json:"downloadCount"`
-	SHA256        string    `json:"sha256"`
-	DownloadURL   string    `json:"downloadUrl"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	PublicID           string     `json:"publicId"`
+	OriginalName       string     `json:"originalName"`
+	DisplayName        string     `json:"displayName"`
+	ContentType        string     `json:"contentType"`
+	Size               int64      `json:"size"`
+	DownloadCount      int64      `json:"downloadCount"`
+	SHA256             string     `json:"sha256"`
+	DownloadURL        string     `json:"downloadUrl"`
+	ExpiresAt          *time.Time `json:"expiresAt,omitempty"`
+	MaxDownloads       *int64     `json:"maxDownloads,omitempty"`
+	RemainingDownloads *int64     `json:"remainingDownloads,omitempty"`
+	PasswordProtected  bool       `json:"passwordProtected"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
 }
 
 type PublicDownload struct {
@@ -78,18 +97,58 @@ type PublicDownload struct {
 	UpdatedAt   time.Time
 }
 
+type SharePolicyUpdateParams struct {
+	ExpiresAt    *time.Time
+	MaxDownloads *int64
+	PasswordMode string
+	Password     string
+}
+
+type ShareAccessGrant struct {
+	Token     string
+	ExpiresAt time.Time
+}
+
+type publicAccessState struct {
+	FileID             int64
+	PublicID           string
+	OriginalName       string
+	DisplayName        string
+	Status             string
+	Visibility         string
+	ContentType        string
+	Size               int64
+	DownloadCount      int64
+	SHA256             string
+	StorageKey         string
+	ExpiresAt          sql.NullTime
+	MaxDownloads       sql.NullInt64
+	AccessPasswordHash sql.NullString
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
 func NewService(
 	database *sql.DB,
 	store *storage.LocalFSStore,
 	publicBaseURL string,
 	resumableChunkSize int64,
 	uploadSessionTTL time.Duration,
+	shareAccessSecret string,
+	shareAccessTTL time.Duration,
 ) *Service {
 	if resumableChunkSize <= 0 {
 		resumableChunkSize = 8 << 20
 	}
 	if uploadSessionTTL <= 0 {
 		uploadSessionTTL = 24 * time.Hour
+	}
+	if shareAccessTTL <= 0 {
+		shareAccessTTL = 12 * time.Hour
+	}
+	shareAccessSecret = strings.TrimSpace(shareAccessSecret)
+	if shareAccessSecret == "" {
+		shareAccessSecret = "sharepier-dev-share-access"
 	}
 
 	return &Service{
@@ -98,6 +157,8 @@ func NewService(
 		publicBaseURL:      strings.TrimRight(publicBaseURL, "/"),
 		resumableChunkSize: resumableChunkSize,
 		uploadSessionTTL:   uploadSessionTTL,
+		shareAccessSecret:  shareAccessSecret,
+		shareAccessTTL:     shareAccessTTL,
 	}
 }
 
@@ -209,6 +270,9 @@ func (s *Service) List(ctx context.Context) ([]FileRecord, error) {
 			o.content_type,
 			o.size,
 			f.download_count,
+			f.expires_at,
+			f.access_password_hash,
+			f.max_downloads,
 			f.created_at,
 			f.updated_at
 		from files f
@@ -223,6 +287,9 @@ func (s *Service) List(ctx context.Context) ([]FileRecord, error) {
 	items := make([]FileRecord, 0)
 	for rows.Next() {
 		var item FileRecord
+		var expiresAt sql.NullTime
+		var accessPasswordHash sql.NullString
+		var maxDownloads sql.NullInt64
 		if err := rows.Scan(
 			&item.ID,
 			&item.PublicID,
@@ -233,12 +300,16 @@ func (s *Service) List(ctx context.Context) ([]FileRecord, error) {
 			&item.ContentType,
 			&item.Size,
 			&item.DownloadCount,
+			&expiresAt,
+			&accessPasswordHash,
+			&maxDownloads,
 			&item.CreatedAt,
 			&item.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
 		item.DownloadURL = s.downloadURL(item.PublicID, item.DisplayName)
+		applyShareMetadata(&item, expiresAt, accessPasswordHash, maxDownloads)
 		items = append(items, item)
 	}
 
@@ -258,6 +329,9 @@ func (s *Service) SetStatus(ctx context.Context, fileID int64, status string) (F
 	}
 
 	var item FileRecord
+	var expiresAt sql.NullTime
+	var accessPasswordHash sql.NullString
+	var maxDownloads sql.NullInt64
 	err := s.db.QueryRowContext(
 		ctx,
 		`update files as f
@@ -274,6 +348,9 @@ func (s *Service) SetStatus(ctx context.Context, fileID int64, status string) (F
 			o.content_type,
 			o.size,
 			f.download_count,
+			f.expires_at,
+			f.access_password_hash,
+			f.max_downloads,
 			f.created_at,
 			f.updated_at`,
 		fileID,
@@ -288,6 +365,9 @@ func (s *Service) SetStatus(ctx context.Context, fileID int64, status string) (F
 		&item.ContentType,
 		&item.Size,
 		&item.DownloadCount,
+		&expiresAt,
+		&accessPasswordHash,
+		&maxDownloads,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 	)
@@ -299,6 +379,7 @@ func (s *Service) SetStatus(ctx context.Context, fileID int64, status string) (F
 	}
 
 	item.DownloadURL = s.downloadURL(item.PublicID, item.DisplayName)
+	applyShareMetadata(&item, expiresAt, accessPasswordHash, maxDownloads)
 	return item, nil
 }
 
@@ -421,78 +502,203 @@ func (s *Service) DeleteMany(ctx context.Context, fileIDs []int64) (int64, error
 	return affectedCount, nil
 }
 
-func (s *Service) GetPublicDownload(ctx context.Context, publicID string) (PublicDownload, error) {
-	var result PublicDownload
-	err := s.db.QueryRowContext(
-		ctx,
-		`select
-			f.id,
-			o.storage_key,
-			f.display_name,
-			o.content_type,
-			o.size,
-			o.sha256,
-			f.updated_at
-		from files f
-		join objects o on o.id = f.object_id
-		where f.public_id = $1 and f.status = 'active' and f.visibility = 'public'`,
-		publicID,
-	).Scan(
-		&result.FileID,
-		&result.StorageKey,
-		&result.FileName,
-		&result.ContentType,
-		&result.Size,
-		&result.SHA256,
-		&result.UpdatedAt,
-	)
+func (s *Service) GetPublicDownload(ctx context.Context, publicID, accessToken string) (PublicDownload, error) {
+	state, err := s.loadPublicAccessState(ctx, publicID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return PublicDownload{}, ErrNotFound
-		}
+		return PublicDownload{}, err
+	}
+	if err := s.authorizePublicAccess(state, accessToken); err != nil {
 		return PublicDownload{}, err
 	}
 
-	return result, nil
+	return PublicDownload{
+		FileID:      state.FileID,
+		StorageKey:  state.StorageKey,
+		FileName:    state.DisplayName,
+		ContentType: state.ContentType,
+		Size:        state.Size,
+		SHA256:      state.SHA256,
+		UpdatedAt:   state.UpdatedAt,
+	}, nil
 }
 
-func (s *Service) GetPublicFile(ctx context.Context, publicID string) (PublicFileRecord, error) {
-	var item PublicFileRecord
-	err := s.db.QueryRowContext(
+func (s *Service) GetPublicFile(ctx context.Context, publicID, accessToken string) (PublicFileRecord, error) {
+	state, err := s.loadPublicAccessState(ctx, publicID)
+	if err != nil {
+		return PublicFileRecord{}, err
+	}
+	if err := s.authorizePublicAccess(state, accessToken); err != nil {
+		return PublicFileRecord{}, err
+	}
+
+	item := PublicFileRecord{
+		PublicID:          state.PublicID,
+		OriginalName:      state.OriginalName,
+		DisplayName:       state.DisplayName,
+		ContentType:       state.ContentType,
+		Size:              state.Size,
+		DownloadCount:     state.DownloadCount,
+		SHA256:            state.SHA256,
+		DownloadURL:       s.downloadURL(state.PublicID, state.DisplayName),
+		PasswordProtected: state.AccessPasswordHash.Valid && strings.TrimSpace(state.AccessPasswordHash.String) != "",
+		CreatedAt:         state.CreatedAt,
+		UpdatedAt:         state.UpdatedAt,
+	}
+	applyPublicShareMetadata(&item, state.ExpiresAt, state.MaxDownloads)
+	return item, nil
+}
+
+func (s *Service) BuildShareAccessGrant(ctx context.Context, publicID, password string) (ShareAccessGrant, error) {
+	state, err := s.loadPublicAccessState(ctx, publicID)
+	if err != nil {
+		return ShareAccessGrant{}, err
+	}
+	if err := s.ensureShareAvailable(state); err != nil {
+		return ShareAccessGrant{}, err
+	}
+	if !state.AccessPasswordHash.Valid || strings.TrimSpace(state.AccessPasswordHash.String) == "" {
+		return ShareAccessGrant{}, nil
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(state.AccessPasswordHash.String), []byte(strings.TrimSpace(password))); err != nil {
+		return ShareAccessGrant{}, ErrSharePasswordInvalid
+	}
+
+	expiresAt := time.Now().UTC().Add(s.shareAccessTTL)
+	if state.ExpiresAt.Valid && state.ExpiresAt.Time.Before(expiresAt) {
+		expiresAt = state.ExpiresAt.Time
+	}
+
+	return ShareAccessGrant{
+		Token:     s.signPublicAccessToken(state, expiresAt),
+		ExpiresAt: expiresAt,
+	}, nil
+}
+
+func (s *Service) UpdateSharePolicy(ctx context.Context, fileID int64, params SharePolicyUpdateParams) (FileRecord, error) {
+	passwordMode := strings.ToLower(strings.TrimSpace(params.PasswordMode))
+	if passwordMode == "" {
+		passwordMode = "keep"
+	}
+
+	switch passwordMode {
+	case "keep", "clear", "set":
+	default:
+		return FileRecord{}, ErrInvalidSharePolicy
+	}
+
+	if params.ExpiresAt != nil {
+		expiresAt := params.ExpiresAt.UTC()
+		if !expiresAt.After(time.Now().UTC()) {
+			return FileRecord{}, fmt.Errorf("%w: expires_at must be in the future", ErrInvalidSharePolicy)
+		}
+		params.ExpiresAt = &expiresAt
+	}
+
+	if params.MaxDownloads != nil && *params.MaxDownloads <= 0 {
+		return FileRecord{}, fmt.Errorf("%w: max_downloads must be positive", ErrInvalidSharePolicy)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return FileRecord{}, err
+	}
+	defer tx.Rollback()
+
+	var currentHash sql.NullString
+	if err := tx.QueryRowContext(ctx, `select access_password_hash from files where id = $1`, fileID).Scan(&currentHash); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return FileRecord{}, ErrNotFound
+		}
+		return FileRecord{}, err
+	}
+
+	nextHash := currentHash
+	switch passwordMode {
+	case "clear":
+		nextHash = sql.NullString{}
+	case "set":
+		password := strings.TrimSpace(params.Password)
+		if password == "" {
+			return FileRecord{}, fmt.Errorf("%w: password must not be empty", ErrInvalidSharePolicy)
+		}
+		passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if err != nil {
+			return FileRecord{}, err
+		}
+		nextHash = sql.NullString{String: string(passwordHash), Valid: true}
+	}
+
+	var expiresValue any
+	if params.ExpiresAt != nil {
+		expiresValue = params.ExpiresAt.UTC()
+	}
+
+	var maxDownloadsValue any
+	if params.MaxDownloads != nil {
+		maxDownloadsValue = *params.MaxDownloads
+	}
+
+	var item FileRecord
+	var expiresAt sql.NullTime
+	var accessPasswordHash sql.NullString
+	var maxDownloads sql.NullInt64
+	err = tx.QueryRowContext(
 		ctx,
-		`select
+		`update files as f
+		set expires_at = $2,
+			max_downloads = $3,
+			access_password_hash = $4,
+			updated_at = now()
+		from objects as o
+		where f.object_id = o.id and f.id = $1
+		returning
+			f.id,
 			f.public_id,
 			f.original_name,
 			f.display_name,
+			f.status,
+			f.visibility,
 			o.content_type,
 			o.size,
 			f.download_count,
-			o.sha256,
+			f.expires_at,
+			f.access_password_hash,
+			f.max_downloads,
 			f.created_at,
-			f.updated_at
-		from files as f
-		join objects as o on o.id = f.object_id
-		where f.public_id = $1 and f.status = 'active' and f.visibility = 'public'`,
-		publicID,
+			f.updated_at`,
+		fileID,
+		expiresValue,
+		maxDownloadsValue,
+		nullStringValue(nextHash),
 	).Scan(
+		&item.ID,
 		&item.PublicID,
 		&item.OriginalName,
 		&item.DisplayName,
+		&item.Status,
+		&item.Visibility,
 		&item.ContentType,
 		&item.Size,
 		&item.DownloadCount,
-		&item.SHA256,
+		&expiresAt,
+		&accessPasswordHash,
+		&maxDownloads,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return PublicFileRecord{}, ErrNotFound
+			return FileRecord{}, ErrNotFound
 		}
-		return PublicFileRecord{}, err
+		return FileRecord{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return FileRecord{}, err
 	}
 
 	item.DownloadURL = s.downloadURL(item.PublicID, item.DisplayName)
+	applyShareMetadata(&item, expiresAt, accessPasswordHash, maxDownloads)
 	return item, nil
 }
 
@@ -503,9 +709,32 @@ func (s *Service) RecordDownload(ctx context.Context, fileID int64, ipAddress, u
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `update files set download_count = download_count + 1 where id = $1`, fileID); err != nil {
+	result, err := tx.ExecContext(
+		ctx,
+		`update files
+		set download_count = download_count + 1
+		where id = $1 and (max_downloads is null or download_count < max_downloads)`,
+		fileID,
+	)
+	if err != nil {
 		return err
 	}
+	affectedRows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affectedRows == 0 {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `select exists(select 1 from files where id = $1)`, fileID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return ErrNotFound
+		}
+
+		return ErrShareDownloadLimitReached
+	}
+
 	if _, err := tx.ExecContext(
 		ctx,
 		`insert into download_events (file_id, ip_hash, user_agent, referer) values ($1, $2, $3, $4)`,
@@ -518,6 +747,168 @@ func (s *Service) RecordDownload(ctx context.Context, fileID int64, ipAddress, u
 	}
 
 	return tx.Commit()
+}
+
+func (s *Service) loadPublicAccessState(ctx context.Context, publicID string) (publicAccessState, error) {
+	publicID = strings.TrimSpace(publicID)
+	if publicID == "" {
+		return publicAccessState{}, ErrNotFound
+	}
+
+	var state publicAccessState
+	err := s.db.QueryRowContext(
+		ctx,
+		`select
+			f.id,
+			f.public_id,
+			f.original_name,
+			f.display_name,
+			f.status,
+			f.visibility,
+			o.content_type,
+			o.size,
+			f.download_count,
+			o.sha256,
+			o.storage_key,
+			f.expires_at,
+			f.max_downloads,
+			f.access_password_hash,
+			f.created_at,
+			f.updated_at
+		from files as f
+		join objects as o on o.id = f.object_id
+		where f.public_id = $1 and f.status = 'active' and f.visibility = 'public'`,
+		publicID,
+	).Scan(
+		&state.FileID,
+		&state.PublicID,
+		&state.OriginalName,
+		&state.DisplayName,
+		&state.Status,
+		&state.Visibility,
+		&state.ContentType,
+		&state.Size,
+		&state.DownloadCount,
+		&state.SHA256,
+		&state.StorageKey,
+		&state.ExpiresAt,
+		&state.MaxDownloads,
+		&state.AccessPasswordHash,
+		&state.CreatedAt,
+		&state.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return publicAccessState{}, ErrNotFound
+		}
+		return publicAccessState{}, err
+	}
+
+	return state, nil
+}
+
+func (s *Service) authorizePublicAccess(state publicAccessState, accessToken string) error {
+	if err := s.ensureShareAvailable(state); err != nil {
+		return err
+	}
+
+	if state.AccessPasswordHash.Valid && strings.TrimSpace(state.AccessPasswordHash.String) != "" {
+		if !s.verifyPublicAccessToken(state, accessToken) {
+			return ErrSharePasswordRequired
+		}
+	}
+
+	return nil
+}
+
+func (s *Service) ensureShareAvailable(state publicAccessState) error {
+	now := time.Now().UTC()
+	if state.ExpiresAt.Valid && now.After(state.ExpiresAt.Time) {
+		return ErrShareExpired
+	}
+	if state.MaxDownloads.Valid && state.DownloadCount >= state.MaxDownloads.Int64 {
+		return ErrShareDownloadLimitReached
+	}
+
+	return nil
+}
+
+func (s *Service) signPublicAccessToken(state publicAccessState, expiresAt time.Time) string {
+	payload := strings.Join([]string{
+		state.PublicID,
+		strconv.FormatInt(expiresAt.UTC().Unix(), 10),
+		strconv.FormatInt(state.UpdatedAt.UTC().UnixNano(), 10),
+		strings.TrimSpace(state.AccessPasswordHash.String),
+	}, ":")
+	mac := hmac.New(sha256.New, []byte(s.shareAccessSecret))
+	_, _ = mac.Write([]byte(payload))
+	signature := hex.EncodeToString(mac.Sum(nil))
+	return fmt.Sprintf("%d.%s", expiresAt.UTC().Unix(), signature)
+}
+
+func (s *Service) verifyPublicAccessToken(state publicAccessState, token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return false
+	}
+
+	expiresUnix, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || expiresUnix <= 0 {
+		return false
+	}
+	expiresAt := time.Unix(expiresUnix, 0).UTC()
+	if time.Now().UTC().After(expiresAt) {
+		return false
+	}
+
+	expected := s.signPublicAccessToken(state, expiresAt)
+	return hmac.Equal([]byte(expected), []byte(token))
+}
+
+func applyShareMetadata(item *FileRecord, expiresAt sql.NullTime, accessPasswordHash sql.NullString, maxDownloads sql.NullInt64) {
+	if expiresAt.Valid {
+		value := expiresAt.Time.UTC()
+		item.ExpiresAt = &value
+	}
+	if maxDownloads.Valid {
+		value := maxDownloads.Int64
+		item.MaxDownloads = &value
+		remaining := maxDownloads.Int64 - item.DownloadCount
+		if remaining < 0 {
+			remaining = 0
+		}
+		item.RemainingDownloads = &remaining
+	}
+	item.PasswordProtected = accessPasswordHash.Valid && strings.TrimSpace(accessPasswordHash.String) != ""
+}
+
+func applyPublicShareMetadata(item *PublicFileRecord, expiresAt sql.NullTime, maxDownloads sql.NullInt64) {
+	if expiresAt.Valid {
+		value := expiresAt.Time.UTC()
+		item.ExpiresAt = &value
+	}
+	if maxDownloads.Valid {
+		value := maxDownloads.Int64
+		item.MaxDownloads = &value
+		remaining := maxDownloads.Int64 - item.DownloadCount
+		if remaining < 0 {
+			remaining = 0
+		}
+		item.RemainingDownloads = &remaining
+	}
+}
+
+func nullStringValue(value sql.NullString) any {
+	if !value.Valid {
+		return nil
+	}
+
+	return value.String
 }
 
 type uploadInsertParams struct {

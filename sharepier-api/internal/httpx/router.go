@@ -51,10 +51,11 @@ type filesResponse struct {
 }
 
 type publicFileResponse struct {
-	Status    string                  `json:"status"`
-	Item      *files.PublicFileRecord `json:"item,omitempty"`
-	Message   string                  `json:"message,omitempty"`
-	Timestamp string                  `json:"timestamp,omitempty"`
+	Status           string                  `json:"status"`
+	Item             *files.PublicFileRecord `json:"item,omitempty"`
+	PasswordRequired bool                    `json:"passwordRequired,omitempty"`
+	Message          string                  `json:"message,omitempty"`
+	Timestamp        string                  `json:"timestamp,omitempty"`
 }
 
 type uploadSessionResponse struct {
@@ -234,6 +235,81 @@ func NewRouter(
 				case errors.Is(err, files.ErrInvalidStatus):
 					statusCode = http.StatusBadRequest
 					message = "unsupported file status"
+				}
+
+				writeJSON(w, statusCode, filesResponse{
+					Status:    strings.ToLower(strings.ReplaceAll(http.StatusText(statusCode), " ", "_")),
+					Message:   message,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			writeJSON(w, http.StatusOK, filesResponse{
+				Status:    "ok",
+				Item:      &item,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+		})
+
+		r.With(requireAuth(authService)).Patch("/files/{fileID}/share-policy", func(w http.ResponseWriter, r *http.Request) {
+			fileID, err := parseInt64Param(r, "fileID")
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, filesResponse{
+					Status:    "bad_request",
+					Message:   "invalid file id",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			var payload struct {
+				ExpiresAt    *string `json:"expiresAt"`
+				MaxDownloads *int64  `json:"maxDownloads"`
+				PasswordMode string  `json:"passwordMode"`
+				Password     string  `json:"password"`
+			}
+			if err := readJSON(r, &payload); err != nil {
+				writeJSON(w, http.StatusBadRequest, filesResponse{
+					Status:    "bad_request",
+					Message:   "invalid request payload",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			var expiresAt *time.Time
+			if payload.ExpiresAt != nil && strings.TrimSpace(*payload.ExpiresAt) != "" {
+				parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*payload.ExpiresAt))
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, filesResponse{
+						Status:    "bad_request",
+						Message:   "invalid expiresAt value",
+						Timestamp: time.Now().UTC().Format(time.RFC3339),
+					})
+					return
+				}
+
+				expiresAt = &parsed
+			}
+
+			item, err := fileService.UpdateSharePolicy(r.Context(), fileID, files.SharePolicyUpdateParams{
+				ExpiresAt:    expiresAt,
+				MaxDownloads: payload.MaxDownloads,
+				PasswordMode: payload.PasswordMode,
+				Password:     payload.Password,
+			})
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				message := "failed to update share policy"
+
+				switch {
+				case errors.Is(err, files.ErrNotFound):
+					statusCode = http.StatusNotFound
+					message = "file not found"
+				case errors.Is(err, files.ErrInvalidSharePolicy):
+					statusCode = http.StatusBadRequest
+					message = err.Error()
 				}
 
 				writeJSON(w, statusCode, filesResponse{
@@ -608,20 +684,121 @@ func NewRouter(
 			})
 		})
 
-		r.Get("/public/files/{publicID}", func(w http.ResponseWriter, r *http.Request) {
-			item, err := fileService.GetPublicFile(r.Context(), chi.URLParam(r, "publicID"))
+		r.Post("/public/files/{publicID}/unlock", func(w http.ResponseWriter, r *http.Request) {
+			publicID := chi.URLParam(r, "publicID")
+
+			var payload struct {
+				Password string `json:"password"`
+			}
+			if err := readJSON(r, &payload); err != nil {
+				writeJSON(w, http.StatusBadRequest, publicFileResponse{
+					Status:    "bad_request",
+					Message:   "invalid request payload",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			grant, err := fileService.BuildShareAccessGrant(r.Context(), publicID, payload.Password)
 			if err != nil {
 				statusCode := http.StatusInternalServerError
-				message := "failed to load public file"
-				if errors.Is(err, files.ErrNotFound) {
+				message := "failed to unlock share"
+				passwordRequired := false
+
+				switch {
+				case errors.Is(err, files.ErrNotFound):
 					statusCode = http.StatusNotFound
 					message = "file not found"
+				case errors.Is(err, files.ErrSharePasswordInvalid), errors.Is(err, files.ErrSharePasswordRequired):
+					statusCode = http.StatusUnauthorized
+					message = "invalid share password"
+					passwordRequired = true
+				case errors.Is(err, files.ErrShareExpired):
+					statusCode = http.StatusGone
+					message = "share link expired"
+				case errors.Is(err, files.ErrShareDownloadLimitReached):
+					statusCode = http.StatusGone
+					message = "download limit reached"
 				}
 
 				writeJSON(w, statusCode, publicFileResponse{
-					Status:    strings.ToLower(strings.ReplaceAll(http.StatusText(statusCode), " ", "_")),
-					Message:   message,
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Status:           strings.ToLower(strings.ReplaceAll(http.StatusText(statusCode), " ", "_")),
+					PasswordRequired: passwordRequired,
+					Message:          message,
+					Timestamp:        time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			if grant.Token != "" {
+				setPublicAccessCookie(w, cfg, publicID, grant.Token, grant.ExpiresAt)
+			}
+
+			item, err := fileService.GetPublicFile(r.Context(), publicID, grant.Token)
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				message := "failed to load public file"
+
+				switch {
+				case errors.Is(err, files.ErrNotFound):
+					statusCode = http.StatusNotFound
+					message = "file not found"
+				case errors.Is(err, files.ErrShareExpired):
+					statusCode = http.StatusGone
+					message = "share link expired"
+				case errors.Is(err, files.ErrShareDownloadLimitReached):
+					statusCode = http.StatusGone
+					message = "download limit reached"
+				case errors.Is(err, files.ErrSharePasswordRequired):
+					statusCode = http.StatusUnauthorized
+					message = "share password required"
+				}
+
+				writeJSON(w, statusCode, publicFileResponse{
+					Status:           strings.ToLower(strings.ReplaceAll(http.StatusText(statusCode), " ", "_")),
+					PasswordRequired: errors.Is(err, files.ErrSharePasswordRequired),
+					Message:          message,
+					Timestamp:        time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
+			writeJSON(w, http.StatusOK, publicFileResponse{
+				Status:    "ok",
+				Item:      &item,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
+		})
+
+		r.Get("/public/files/{publicID}", func(w http.ResponseWriter, r *http.Request) {
+			publicID := chi.URLParam(r, "publicID")
+			item, err := fileService.GetPublicFile(r.Context(), publicID, publicAccessTokenFromRequest(r, cfg, publicID))
+			if err != nil {
+				statusCode := http.StatusInternalServerError
+				message := "failed to load public file"
+				passwordRequired := false
+
+				switch {
+				case errors.Is(err, files.ErrNotFound):
+					statusCode = http.StatusNotFound
+					message = "file not found"
+				case errors.Is(err, files.ErrSharePasswordRequired):
+					statusCode = http.StatusUnauthorized
+					message = "share password required"
+					passwordRequired = true
+				case errors.Is(err, files.ErrShareExpired):
+					statusCode = http.StatusGone
+					message = "share link expired"
+				case errors.Is(err, files.ErrShareDownloadLimitReached):
+					statusCode = http.StatusGone
+					message = "download limit reached"
+				}
+
+				writeJSON(w, statusCode, publicFileResponse{
+					Status:           strings.ToLower(strings.ReplaceAll(http.StatusText(statusCode), " ", "_")),
+					PasswordRequired: passwordRequired,
+					Message:          message,
+					Timestamp:        time.Now().UTC().Format(time.RFC3339),
 				})
 				return
 			}
@@ -635,20 +812,30 @@ func NewRouter(
 	})
 
 	handlePublicDownload := func(w http.ResponseWriter, r *http.Request) {
-		info, err := fileService.GetPublicDownload(r.Context(), chi.URLParam(r, "publicID"))
+		publicID := chi.URLParam(r, "publicID")
+		info, err := fileService.GetPublicDownload(r.Context(), publicID, publicAccessTokenFromRequest(r, cfg, publicID))
 		if err != nil {
-			if errors.Is(err, files.ErrNotFound) {
-				writeJSON(w, http.StatusNotFound, statusResponse{
-					Status:    "not_found",
-					Message:   "file not found",
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-				})
-				return
+			statusCode := http.StatusInternalServerError
+			message := "failed to resolve download"
+
+			switch {
+			case errors.Is(err, files.ErrNotFound):
+				statusCode = http.StatusNotFound
+				message = "file not found"
+			case errors.Is(err, files.ErrSharePasswordRequired):
+				statusCode = http.StatusUnauthorized
+				message = "share password required"
+			case errors.Is(err, files.ErrShareExpired):
+				statusCode = http.StatusGone
+				message = "share link expired"
+			case errors.Is(err, files.ErrShareDownloadLimitReached):
+				statusCode = http.StatusGone
+				message = "download limit reached"
 			}
 
-			writeJSON(w, http.StatusInternalServerError, statusResponse{
-				Status:    "error",
-				Message:   "failed to resolve download",
+			writeJSON(w, statusCode, statusResponse{
+				Status:    strings.ToLower(strings.ReplaceAll(http.StatusText(statusCode), " ", "_")),
+				Message:   message,
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 			})
 			return
@@ -683,6 +870,15 @@ func NewRouter(
 			r.UserAgent(),
 			r.Referer(),
 		); err != nil {
+			if errors.Is(err, files.ErrShareDownloadLimitReached) {
+				writeJSON(w, http.StatusGone, statusResponse{
+					Status:    "gone",
+					Message:   "download limit reached",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				})
+				return
+			}
+
 			logger.Warn("failed to record download event", slog.String("error", err.Error()), slog.Int64("file_id", info.FileID))
 		}
 
@@ -739,4 +935,35 @@ func parseInt64Param(r *http.Request, key string) (int64, error) {
 	}
 
 	return strconv.ParseInt(value, 10, 64)
+}
+
+func publicAccessTokenFromRequest(r *http.Request, cfg config.Config, publicID string) string {
+	cookie, err := r.Cookie(publicAccessCookieName(cfg.ShareAccessCookie, publicID))
+	if err != nil {
+		return ""
+	}
+
+	return cookie.Value
+}
+
+func setPublicAccessCookie(w http.ResponseWriter, cfg config.Config, publicID, token string, expiresAt time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     publicAccessCookieName(cfg.ShareAccessCookie, publicID),
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   cfg.SecureCookies,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  expiresAt,
+		MaxAge:   int(time.Until(expiresAt).Seconds()),
+	})
+}
+
+func publicAccessCookieName(baseName, publicID string) string {
+	baseName = strings.TrimSpace(baseName)
+	if baseName == "" {
+		baseName = "sharepier_public_access"
+	}
+
+	return baseName + "_" + strings.TrimSpace(publicID)
 }

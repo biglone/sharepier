@@ -4,8 +4,8 @@
 
 ## 当前骨架
 
-- `sharepier-web`: `React + Vite + TypeScript` 管理台、搜索/筛选/批量操作与公开分享页，当前走静态构建产物服务
-- `sharepier-api`: `Go + chi` API、管理员登录、普通上传、分片上传/续传、列表、禁用、删除、公开下载、公开文件元数据
+- `sharepier-web`: `React + Vite + TypeScript` 管理台、搜索/筛选/批量操作、分享策略配置与公开分享页，当前走静态构建产物服务
+- `sharepier-api`: `Go + chi` API、管理员登录、普通上传、分片上传/续传、列表、禁用、删除、公开下载、公开文件元数据与分享策略鉴权
 - `docker-compose.yml`: 本地开发依赖与容器化运行入口
 - `cloudflared/config.yml.example`: Tunnel 配置示例
 - `sharepier-api/migrations/0001_init.sql`: 首版数据库表结构草稿
@@ -48,6 +48,7 @@ Compose 已为容器注入 `host.docker.internal -> host-gateway`，便于这种
 - `sharepier-web` 默认使用 `npm ci`，并通过 `NPM_CONFIG_REGISTRY` 指向 `https://registry.npmmirror.com`，减少容器内首次安装依赖耗时
 - `sharepier-web` 使用 `node:22-alpine`，容器启动后会先构建静态资源，再用 Node 静态文件服务对外提供页面
 - 默认普通上传入口受 `SHAREPIER_MAX_UPLOAD_SIZE` 控制；大文件分片上传走独立会话，单片大小由 `SHAREPIER_RESUMABLE_CHUNK_SIZE` 控制，会话过期时间由 `SHAREPIER_UPLOAD_SESSION_TTL` 控制
+- 分享策略支持三类限制：失效时间、访问密码、最大下载次数；密码保护通过短期 HttpOnly Cookie 解锁，密钥由 `SHAREPIER_SHARE_ACCESS_SECRET` 提供
 
 启动后默认地址：
 
@@ -92,6 +93,7 @@ cp .env.public.example .env
 - `SHAREPIER_PUBLIC_BASE_URL`
 - `VITE_API_BASE_URL`
 - `SHAREPIER_ADMIN_PASSWORD`
+- `SHAREPIER_SHARE_ACCESS_SECRET`
 
 ### 2. 准备 tunnel 配置
 
@@ -138,4 +140,5 @@ curl -I https://sharepier.biglone.tech/api/v1/health
 ## 下一步
 
 - 将管理员密码替换成你自己的长期密码
+- 将 `SHAREPIER_SHARE_ACCESS_SECRET` 换成独立随机长串
 - 引入 S3 兼容对象存储

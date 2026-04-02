@@ -44,6 +44,10 @@ export interface FileRecord {
   size: number
   downloadCount: number
   downloadUrl: string
+  expiresAt?: string
+  maxDownloads?: number
+  remainingDownloads?: number
+  passwordProtected: boolean
   createdAt: string
   updatedAt: string
 }
@@ -57,6 +61,10 @@ export interface PublicFileRecord {
   downloadCount: number
   sha256: string
   downloadUrl: string
+  expiresAt?: string
+  maxDownloads?: number
+  remainingDownloads?: number
+  passwordProtected: boolean
   createdAt: string
   updatedAt: string
 }
@@ -73,6 +81,7 @@ export interface FilesResponse {
 export interface PublicFileResponse {
   status: string
   item?: PublicFileRecord
+  passwordRequired?: boolean
   message?: string
   timestamp?: string
 }
@@ -161,6 +170,13 @@ export function getPublicFile(publicId: string): Promise<PublicFileResponse> {
   return requestJSON<PublicFileResponse>(`/api/v1/public/files/${encodeURIComponent(publicId)}`)
 }
 
+export function unlockPublicFile(publicId: string, password: string): Promise<PublicFileResponse> {
+  return requestJSON<PublicFileResponse>(`/api/v1/public/files/${encodeURIComponent(publicId)}/unlock`, {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  })
+}
+
 export function batchUpdateFiles(
   action: 'set_status' | 'delete',
   fileIds: number[],
@@ -173,6 +189,21 @@ export function batchUpdateFiles(
       fileIds,
       ...(status ? { status } : {}),
     }),
+  })
+}
+
+export function updateSharePolicy(
+  fileId: number,
+  payload: {
+    expiresAt: string | null
+    maxDownloads: number | null
+    passwordMode: 'keep' | 'clear' | 'set'
+    password: string
+  },
+): Promise<FilesResponse> {
+  return requestJSON<FilesResponse>(`/api/v1/files/${fileId}/share-policy`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
   })
 }
 

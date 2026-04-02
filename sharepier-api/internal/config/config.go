@@ -20,6 +20,9 @@ type Config struct {
 	SessionTTL             time.Duration
 	SessionCookie          string
 	SecureCookies          bool
+	ShareAccessCookie      string
+	ShareAccessSecret      string
+	ShareAccessTTL         time.Duration
 	StorageRoot            string
 	PublicBaseURL          string
 	MaxUploadSize          int64
@@ -45,6 +48,9 @@ func Load() Config {
 		SessionTTL:             getEnvAsDuration("SHAREPIER_SESSION_TTL", 168*time.Hour),
 		SessionCookie:          getEnv("SHAREPIER_SESSION_COOKIE_NAME", "sharepier_session"),
 		SecureCookies:          getEnvAsBool("SHAREPIER_SECURE_COOKIES", secureCookiesDefault),
+		ShareAccessCookie:      getEnv("SHAREPIER_SHARE_ACCESS_COOKIE_NAME", "sharepier_public_access"),
+		ShareAccessSecret:      getEnv("SHAREPIER_SHARE_ACCESS_SECRET", getEnv("SHAREPIER_ADMIN_PASSWORD", "sharepier-dev-share-access")),
+		ShareAccessTTL:         getEnvAsDuration("SHAREPIER_SHARE_ACCESS_TTL", 12*time.Hour),
 		StorageRoot:            getEnv("SHAREPIER_STORAGE_ROOT", "./data/storage"),
 		PublicBaseURL:          getEnv("SHAREPIER_PUBLIC_BASE_URL", "http://localhost:8080"),
 		MaxUploadSize:          getEnvAsInt64("SHAREPIER_MAX_UPLOAD_SIZE", 100<<20),
