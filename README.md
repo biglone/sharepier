@@ -43,8 +43,8 @@ Compose 已为容器注入 `host.docker.internal -> host-gateway`，便于这种
 
 额外说明：
 
-- `postgres` 服务复用本地已有的 `golang:1.26.1-alpine` 镜像，并在容器启动时安装 PostgreSQL 运行时，绕开某些环境下 `dockerproxy.com` / Docker Hub mirror 拉取 `postgres:17-alpine` 失败的问题
-- 运行时安装默认使用清华 Alpine 镜像源，可通过 `SHAREPIER_ALPINE_MAIN_REPOSITORY` / `SHAREPIER_ALPINE_COMMUNITY_REPOSITORY` 覆盖
+- `postgres` 服务直接使用官方 `postgres:17-alpine` 镜像，数据仍持久化到 `./data/postgres`
+- 如果本机 Docker 需要代理拉取镜像，优先设置 `DOCKER_HTTP_PROXY` / `DOCKER_HTTPS_PROXY` / `DOCKER_ALL_PROXY`，必要时先手动执行 `docker pull postgres:17-alpine`
 - `sharepier-api` 默认 `GOPROXY` 已切到 `https://goproxy.cn,direct`，避免容器内拉取较大 Go 依赖时频繁遇到 `unexpected EOF`
 - `sharepier-web` 默认使用 `npm ci`，并通过 `NPM_CONFIG_REGISTRY` 指向 `https://registry.npmmirror.com`，减少容器内首次安装依赖耗时
 - `sharepier-web` 使用 `node:22-alpine`，容器启动后会先构建静态资源，再用 Node 静态文件服务对外提供页面

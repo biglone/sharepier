@@ -1,31 +1,21 @@
 services:
   postgres:
-    image: golang:1.26.1-alpine
+    image: postgres:17-alpine
     container_name: sharepier-postgres
-    working_dir: /work
-    command: sh /usr/local/bin/sharepier-postgres-bootstrap
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-sharepier}
       POSTGRES_USER: ${POSTGRES_USER:-sharepier}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sharepier}
-      PGDATA: /var/lib/postgresql/data/pgdata
-      SHAREPIER_ALPINE_MAIN_REPOSITORY: ${SHAREPIER_ALPINE_MAIN_REPOSITORY:-https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.23/main}
-      SHAREPIER_ALPINE_COMMUNITY_REPOSITORY: ${SHAREPIER_ALPINE_COMMUNITY_REPOSITORY:-https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.23/community}
-      HTTP_PROXY: ${DOCKER_HTTP_PROXY:-${HTTP_PROXY:-}}
-      HTTPS_PROXY: ${DOCKER_HTTPS_PROXY:-${HTTPS_PROXY:-}}
-      ALL_PROXY: ${DOCKER_ALL_PROXY:-${ALL_PROXY:-}}
-      NO_PROXY: ${DOCKER_NO_PROXY:-${NO_PROXY:-}}
+      PGDATA: ${PGDATA:-/var/lib/postgresql/data/pgdata}
     ports:
       - '5432:5432'
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
-      - ./docker/postgres/bootstrap.sh:/usr/local/bin/sharepier-postgres-bootstrap:ro
-      - ./docker/postgres/docker-entrypoint.sh:/usr/local/bin/sharepier-postgres-entrypoint:ro
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5432 -U ${POSTGRES_USER:-sharepier} -d ${POSTGRES_DB:-sharepier}']
-      start_period: 300s
+      start_period: 20s
       interval: 5s
       timeout: 5s
       retries: 60
