@@ -1,0 +1,13 @@
+tunnel: YOUR_TUNNEL_ID
+credentials-file: /etc/cloudflared/YOUR_TUNNEL_ID.json
+
+ingress:
+  - hostname: sharepier.example.com
+    path: /api/.*
+    service: http://sharepier-api:8080
+  - hostname: sharepier.example.com
+    path: /f/.*
+    service: http://sharepier-api:8080
+  - hostname: sharepier.example.com
+    service: http://sharepier-web:3000
+  - service: http_status:404

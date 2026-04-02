@@ -1,0 +1,102 @@
+services:
+  postgres:
+    image: golang:1.26.1-alpine
+    container_name: sharepier-postgres
+    working_dir: /work
+    command: sh /usr/local/bin/sharepier-postgres-bootstrap
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sharepier}
+      POSTGRES_USER: ${POSTGRES_USER:-sharepier}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sharepier}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      SHAREPIER_ALPINE_MAIN_REPOSITORY: ${SHAREPIER_ALPINE_MAIN_REPOSITORY:-https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.23/main}
+      SHAREPIER_ALPINE_COMMUNITY_REPOSITORY: ${SHAREPIER_ALPINE_COMMUNITY_REPOSITORY:-https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.23/community}
+      HTTP_PROXY: ${DOCKER_HTTP_PROXY:-${HTTP_PROXY:-}}
+      HTTPS_PROXY: ${DOCKER_HTTPS_PROXY:-${HTTPS_PROXY:-}}
+      ALL_PROXY: ${DOCKER_ALL_PROXY:-${ALL_PROXY:-}}
+      NO_PROXY: ${DOCKER_NO_PROXY:-${NO_PROXY:-}}
+    ports:
+      - '5432:5432'
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./docker/postgres/bootstrap.sh:/usr/local/bin/sharepier-postgres-bootstrap:ro
+      - ./docker/postgres/docker-entrypoint.sh:/usr/local/bin/sharepier-postgres-entrypoint:ro
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5432 -U ${POSTGRES_USER:-sharepier} -d ${POSTGRES_DB:-sharepier}']
+      start_period: 300s
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  sharepier-api:
+    image: golang:1.26.1-alpine
+    container_name: sharepier-api
+    working_dir: /app
+    command: sh -c 'if [ -x ./api ]; then exec ./api; fi; export PATH=/usr/local/go/bin:$PATH; go mod download && go run ./cmd/api'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    environment:
+      HTTP_PROXY: ${DOCKER_HTTP_PROXY:-${HTTP_PROXY:-}}
+      HTTPS_PROXY: ${DOCKER_HTTPS_PROXY:-${HTTPS_PROXY:-}}
+      ALL_PROXY: ${DOCKER_ALL_PROXY:-${ALL_PROXY:-}}
+      NO_PROXY: ${DOCKER_NO_PROXY:-${NO_PROXY:-}}
+      GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+      DATABASE_URL: ${DATABASE_URL:-postgres://sharepier:sharepier@postgres:5432/sharepier?sslmode=disable}
+      SHAREPIER_ENV: ${SHAREPIER_ENV:-development}
+      SHAREPIER_HOST: ${SHAREPIER_HOST:-0.0.0.0}
+      SHAREPIER_PORT: ${SHAREPIER_PORT:-8080}
+      SHAREPIER_MIGRATIONS_DIR: ${SHAREPIER_MIGRATIONS_DIR:-./migrations}
+      SHAREPIER_SESSION_COOKIE_NAME: ${SHAREPIER_SESSION_COOKIE_NAME:-sharepier_session}
+      SHAREPIER_SESSION_TTL: ${SHAREPIER_SESSION_TTL:-168h}
+      SHAREPIER_SECURE_COOKIES: ${SHAREPIER_SECURE_COOKIES:-false}
+      SHAREPIER_ALLOWED_ORIGINS: ${SHAREPIER_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:3300,http://127.0.0.1:3300,http://localhost:5173,http://127.0.0.1:5173}
+      SHAREPIER_STORAGE_ROOT: ${SHAREPIER_STORAGE_ROOT:-/data/storage}
+      SHAREPIER_PUBLIC_BASE_URL: ${SHAREPIER_PUBLIC_BASE_URL:-http://localhost:38080}
+      SHAREPIER_MAX_UPLOAD_SIZE: ${SHAREPIER_MAX_UPLOAD_SIZE:-104857600}
+      SHAREPIER_ADMIN_USERNAME: ${SHAREPIER_ADMIN_USERNAME:-admin}
+      SHAREPIER_ADMIN_PASSWORD: ${SHAREPIER_ADMIN_PASSWORD:-change-me-now}
+    ports:
+      - '${SHAREPIER_API_HOST_PORT:-38080}:8080'
+    volumes:
+      - ./sharepier-api:/app
+      - ./data/storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  sharepier-web:
+    image: node:22-alpine
+    container_name: sharepier-web
+    working_dir: /app
+    command: sh -c 'npm ci && npm run build && npm run start:static'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    environment:
+      HTTP_PROXY: ${DOCKER_HTTP_PROXY:-${HTTP_PROXY:-}}
+      HTTPS_PROXY: ${DOCKER_HTTPS_PROXY:-${HTTPS_PROXY:-}}
+      ALL_PROXY: ${DOCKER_ALL_PROXY:-${ALL_PROXY:-}}
+      NO_PROXY: ${DOCKER_NO_PROXY:-${NO_PROXY:-}}
+      NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:38080}
+      HOST: 0.0.0.0
+      PORT: 3000
+    ports:
+      - '${SHAREPIER_WEB_HOST_PORT:-3300}:3000'
+    volumes:
+      - ./sharepier-web:/app
+    depends_on:
+      - sharepier-api
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: sharepier-cloudflared
+    command: tunnel --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared:/etc/cloudflared
+    depends_on:
+      - sharepier-web
+      - sharepier-api
+    profiles:
+      - tunnel

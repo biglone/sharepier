@@ -1,0 +1,15 @@
+sharepier-web/node_modules/
+sharepier-web/dist/
+sharepier-web/.vite/
+sharepier-web/*.tsbuildinfo
+sharepier-api/bin/
+sharepier-api/.cache/
+sharepier-api/api
+data/postgres/*
+data/storage/*
+cloudflared/*.json
+cloudflared/config.yml
+.env
+!data/postgres/.gitkeep
+!data/storage/.gitkeep
+!cloudflared/.gitkeep
