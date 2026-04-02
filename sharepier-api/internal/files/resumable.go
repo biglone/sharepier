@@ -87,7 +87,23 @@ func (s *Service) CreateUploadSession(ctx context.Context, params CreateUploadSe
 	createdAt := time.Now().UTC()
 	expiredAt := createdAt.Add(s.uploadSessionTTL)
 
-	if _, err := s.db.ExecContext(
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		_ = os.Remove(s.uploadSessionPath(uploadToken))
+		return UploadSession{}, err
+	}
+	defer tx.Rollback()
+
+	if err := s.lockStorageQuotaTx(ctx, tx); err != nil {
+		_ = os.Remove(s.uploadSessionPath(uploadToken))
+		return UploadSession{}, err
+	}
+	if err := s.ensureStorageQuotaTx(ctx, tx, params.TotalSize, ""); err != nil {
+		_ = os.Remove(s.uploadSessionPath(uploadToken))
+		return UploadSession{}, err
+	}
+
+	if _, err := tx.ExecContext(
 		ctx,
 		`insert into upload_sessions (
 			user_id,
@@ -108,6 +124,10 @@ func (s *Service) CreateUploadSession(ctx context.Context, params CreateUploadSe
 		contentType,
 		expiredAt,
 	); err != nil {
+		_ = os.Remove(s.uploadSessionPath(uploadToken))
+		return UploadSession{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		_ = os.Remove(s.uploadSessionPath(uploadToken))
 		return UploadSession{}, err
 	}
@@ -207,6 +227,11 @@ func (s *Service) CompleteUploadSession(ctx context.Context, uploadToken string)
 		return FileRecord{}, err
 	}
 
+	if err := s.lockStorageQuotaTx(ctx, tx); err != nil {
+		tx.Rollback()
+		return FileRecord{}, err
+	}
+
 	session, err := s.loadUploadSessionForUpdate(ctx, tx, uploadToken)
 	if err != nil {
 		tx.Rollback()
@@ -219,6 +244,10 @@ func (s *Service) CompleteUploadSession(ctx context.Context, uploadToken string)
 	if session.ReceivedSize != session.TotalSize {
 		tx.Rollback()
 		return FileRecord{}, ErrUploadSessionNotReady
+	}
+	if err := s.ensureStorageQuotaTx(ctx, tx, session.TotalSize, session.UploadToken); err != nil {
+		tx.Rollback()
+		return FileRecord{}, err
 	}
 
 	if _, err := tx.ExecContext(
@@ -240,10 +269,12 @@ func (s *Service) CompleteUploadSession(ctx context.Context, uploadToken string)
 	defer partFile.Close()
 
 	record, err := s.Upload(ctx, UploadParams{
-		OwnerUserID:  session.UserID,
-		OriginalName: session.OriginalName,
-		DisplayName:  session.DisplayName,
-		Reader:       partFile,
+		OwnerUserID:           session.UserID,
+		OriginalName:          session.OriginalName,
+		DisplayName:           session.DisplayName,
+		ExpectedSize:          session.TotalSize,
+		QuotaReservationToken: session.UploadToken,
+		Reader:                partFile,
 	})
 	if err != nil {
 		_, _ = s.db.ExecContext(ctx, `update upload_sessions set status = 'uploaded' where upload_token = $1`, uploadToken)

@@ -70,6 +70,7 @@ func main() {
 		database,
 		store,
 		cfg.PublicBaseURL,
+		cfg.StorageQuotaBytes,
 		cfg.ResumableChunkSize,
 		cfg.UploadSessionTTL,
 		cfg.ShareAccessSecret,

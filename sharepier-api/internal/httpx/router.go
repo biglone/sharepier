@@ -748,6 +748,7 @@ func NewRouter(
 				OwnerUserID:  user.ID,
 				OriginalName: header.Filename,
 				DisplayName:  r.FormValue("displayName"),
+				ExpectedSize: header.Size,
 				Reader:       uploadedFile,
 			})
 			if err != nil {
@@ -756,10 +757,13 @@ func NewRouter(
 				if errors.Is(err, files.ErrInvalidUpload) {
 					status = http.StatusBadRequest
 					message = err.Error()
+				} else if errors.Is(err, files.ErrStorageQuotaExceeded) {
+					status = http.StatusInsufficientStorage
+					message = "storage quota exceeded"
 				}
 
 				writeJSON(w, status, filesResponse{
-					Status:    "error",
+					Status:    strings.ToLower(strings.ReplaceAll(http.StatusText(status), " ", "_")),
 					Message:   message,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
 				})
@@ -825,6 +829,9 @@ func NewRouter(
 				if errors.Is(err, files.ErrInvalidUpload) {
 					statusCode = http.StatusBadRequest
 					message = err.Error()
+				} else if errors.Is(err, files.ErrStorageQuotaExceeded) {
+					statusCode = http.StatusInsufficientStorage
+					message = "storage quota exceeded"
 				}
 
 				writeJSON(w, statusCode, uploadSessionResponse{
@@ -948,6 +955,9 @@ func NewRouter(
 				case errors.Is(err, files.ErrUploadSessionNotReady):
 					statusCode = http.StatusConflict
 					message = "upload session is not fully uploaded"
+				case errors.Is(err, files.ErrStorageQuotaExceeded):
+					statusCode = http.StatusInsufficientStorage
+					message = "storage quota exceeded"
 				}
 
 				writeJSON(w, statusCode, uploadSessionResponse{

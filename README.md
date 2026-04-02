@@ -51,7 +51,7 @@ Compose 已为容器注入 `host.docker.internal -> host-gateway`，便于这种
 - 默认普通上传入口受 `SHAREPIER_MAX_UPLOAD_SIZE` 控制；大文件分片上传走独立会话，单片大小由 `SHAREPIER_RESUMABLE_CHUNK_SIZE` 控制，会话过期时间由 `SHAREPIER_UPLOAD_SESSION_TTL` 控制
 - 分享策略支持三类限制：失效时间、访问密码、最大下载次数；密码保护通过短期 HttpOnly Cookie 解锁，密钥由 `SHAREPIER_SHARE_ACCESS_SECRET` 提供
 - 存储后端默认是 `local`；将 `SHAREPIER_STORAGE_BACKEND=s3` 后，可切换到任意兼容 `S3 API` 的对象存储（如 `MinIO`、`AWS S3`、`Cloudflare R2`）
-- `SHAREPIER_STORAGE_QUOTA_BYTES` 可选；设置后管理台会展示配额、已用空间、剩余空间和用量百分比，默认 `0` 表示不设置上限
+- `SHAREPIER_STORAGE_QUOTA_BYTES` 可选；设置后管理台会展示配额、已用空间、剩余空间和用量百分比，并在普通上传、分片会话创建、分片完成时执行服务端配额拦截；默认 `0` 表示不设置上限
 
 启动后默认地址：
 
@@ -193,5 +193,5 @@ docker compose up -d sharepier-api
 
 - 将管理员密码替换成你自己的长期密码
 - 将 `SHAREPIER_SHARE_ACCESS_SECRET` 换成独立随机长串
-- 增加真正的上传前配额拦截
+- 增加过期分片会话清理，释放已过期的临时上传占用
 - 增加审计日志分页与更多筛选维度

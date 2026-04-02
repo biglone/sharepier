@@ -25,6 +25,7 @@ import (
 )
 
 var ErrInvalidUpload = errors.New("invalid upload")
+var ErrStorageQuotaExceeded = errors.New("storage quota exceeded")
 var ErrNotFound = errors.New("file not found")
 var ErrInvalidStatus = errors.New("invalid file status")
 var ErrInvalidSelection = errors.New("invalid file selection")
@@ -38,6 +39,7 @@ type Service struct {
 	db                 *sql.DB
 	store              storage.Store
 	publicBaseURL      string
+	storageQuotaBytes  int64
 	resumableChunkSize int64
 	uploadSessionTTL   time.Duration
 	shareAccessSecret  string
@@ -55,10 +57,12 @@ type StorageStats struct {
 }
 
 type UploadParams struct {
-	OwnerUserID  int64
-	OriginalName string
-	DisplayName  string
-	Reader       io.Reader
+	OwnerUserID           int64
+	OriginalName          string
+	DisplayName           string
+	ExpectedSize          int64
+	QuotaReservationToken string
+	Reader                io.Reader
 }
 
 type FileRecord struct {
@@ -143,6 +147,7 @@ func NewService(
 	database *sql.DB,
 	store storage.Store,
 	publicBaseURL string,
+	storageQuotaBytes int64,
 	resumableChunkSize int64,
 	uploadSessionTTL time.Duration,
 	shareAccessSecret string,
@@ -166,6 +171,7 @@ func NewService(
 		db:                 database,
 		store:              store,
 		publicBaseURL:      strings.TrimRight(publicBaseURL, "/"),
+		storageQuotaBytes:  storageQuotaBytes,
 		resumableChunkSize: resumableChunkSize,
 		uploadSessionTTL:   uploadSessionTTL,
 		shareAccessSecret:  shareAccessSecret,
@@ -182,6 +188,12 @@ func (s *Service) Upload(ctx context.Context, params UploadParams) (FileRecord, 
 	displayName := sanitizeFileName(params.DisplayName)
 	if displayName == "" {
 		displayName = originalName
+	}
+
+	if params.ExpectedSize > 0 {
+		if err := s.ensureStorageQuota(ctx, params.ExpectedSize, params.QuotaReservationToken); err != nil {
+			return FileRecord{}, err
+		}
 	}
 
 	tempFile, err := os.CreateTemp("", "sharepier-upload-*")
@@ -251,14 +263,15 @@ func (s *Service) Upload(ctx context.Context, params UploadParams) (FileRecord, 
 	}
 
 	record, err := s.insertUpload(ctx, uploadInsertParams{
-		OwnerUserID:  params.OwnerUserID,
-		StorageKey:   storageKey,
-		SHA256:       sha256Hex,
-		Size:         totalSize,
-		ContentType:  contentType,
-		OriginalName: originalName,
-		DisplayName:  displayName,
-		PublicID:     publicID,
+		OwnerUserID:           params.OwnerUserID,
+		StorageKey:            storageKey,
+		SHA256:                sha256Hex,
+		Size:                  totalSize,
+		ContentType:           contentType,
+		OriginalName:          originalName,
+		DisplayName:           displayName,
+		PublicID:              publicID,
+		QuotaReservationToken: params.QuotaReservationToken,
 	})
 	if err != nil {
 		_ = s.store.Delete(ctx, storageKey)
@@ -1053,14 +1066,15 @@ func nullStringValue(value sql.NullString) any {
 }
 
 type uploadInsertParams struct {
-	OwnerUserID  int64
-	StorageKey   string
-	SHA256       string
-	Size         int64
-	ContentType  string
-	OriginalName string
-	DisplayName  string
-	PublicID     string
+	OwnerUserID           int64
+	StorageKey            string
+	SHA256                string
+	Size                  int64
+	ContentType           string
+	OriginalName          string
+	DisplayName           string
+	PublicID              string
+	QuotaReservationToken string
 }
 
 func (s *Service) insertUpload(ctx context.Context, params uploadInsertParams) (FileRecord, error) {
@@ -1069,6 +1083,13 @@ func (s *Service) insertUpload(ctx context.Context, params uploadInsertParams) (
 		return FileRecord{}, err
 	}
 	defer tx.Rollback()
+
+	if err := s.lockStorageQuotaTx(ctx, tx); err != nil {
+		return FileRecord{}, err
+	}
+	if err := s.ensureStorageQuotaTx(ctx, tx, params.Size, params.QuotaReservationToken); err != nil {
+		return FileRecord{}, err
+	}
 
 	var objectID int64
 	if err := tx.QueryRowContext(
@@ -1182,6 +1203,66 @@ func randomToken(characters int) (string, error) {
 	}
 
 	return token, nil
+}
+
+func (s *Service) ensureStorageQuota(ctx context.Context, incomingBytes int64, excludeUploadToken string) error {
+	if s.storageQuotaBytes <= 0 || incomingBytes <= 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := s.ensureStorageQuotaTx(ctx, tx, incomingBytes, excludeUploadToken); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func (s *Service) ensureStorageQuotaTx(ctx context.Context, tx *sql.Tx, incomingBytes int64, excludeUploadToken string) error {
+	if s.storageQuotaBytes <= 0 || incomingBytes <= 0 {
+		return nil
+	}
+
+	var (
+		storedBytes   int64
+		reservedBytes int64
+	)
+	err := tx.QueryRowContext(
+		ctx,
+		`select
+			coalesce((select sum(size) from objects), 0),
+			coalesce((
+				select sum(total_size)
+				from upload_sessions
+				where expired_at > now()
+				  and status in ('pending', 'uploading', 'uploaded', 'completing')
+				  and ($1 = '' or upload_token <> $1)
+			), 0)`,
+		strings.TrimSpace(excludeUploadToken),
+	).Scan(&storedBytes, &reservedBytes)
+	if err != nil {
+		return err
+	}
+
+	if storedBytes+reservedBytes+incomingBytes <= s.storageQuotaBytes {
+		return nil
+	}
+
+	return ErrStorageQuotaExceeded
+}
+
+func (s *Service) lockStorageQuotaTx(ctx context.Context, tx *sql.Tx) error {
+	if s.storageQuotaBytes <= 0 {
+		return nil
+	}
+
+	_, err := tx.ExecContext(ctx, `select pg_advisory_xact_lock($1)`, int64(2026040301))
+	return err
 }
 
 func hashString(value string) string {
